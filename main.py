@@ -186,27 +186,31 @@ def compute_pairwise_loss(img_pairs: List[PlanePair], frames: Iterable[int] = (0
             print(loss_frame)
 
             if visualize:
+                # Visualize
+                scaling = 8
                 cat_line = normalize_image_with_mean_lv_value(np.stack((sampled_im1, np.zeros_like(sampled_im1), sampled_im2), axis=0)) * 255
                 cat_line = cv2.UMat(cat_line.astype(np.uint8))
-                cat_line = cv2.resize(cat_line, (sampled_im1.shape[0] * 8, 2*8))
+                cat_line = cv2.resize(cat_line, (sampled_im1.shape[0] * scaling, 3 * scaling))
                 cv2.imshow(pair.name1 + pair.name2 + "line", cat_line)
 
-                # Visualize
+                scaling = 3
                 im1_vis = np.concatenate((pair.img1[..., f], pair.img1[..., f]), axis=1)
                 im1_vis = normalize_image(im1_vis) * 255
-                im1_vis = cv2.UMat(np.stack([im1_vis.astype(np.uint8)]*3, axis=-1))
+                im1_vis_ = cv2.UMat(np.stack([im1_vis.astype(np.uint8)]*3, axis=-1))
                 p1 = line_im1[:, 0].round().astype(int)
                 p2 = line_im1[:, -1].round().astype(int)
-                cv2.line(im1_vis, (p1[1], p1[0],), (p2[1], p2[0],), (0,255,0))
-                cv2.imshow(pair.name1, im1_vis)
+                cv2.line(im1_vis_, (p1[1], p1[0],), (p2[1], p2[0],), (0,255,0))
+                im1_vis_ = cv2.resize(im1_vis_, (im1_vis.shape[1] * scaling, im1_vis.shape[0] * scaling))
+                cv2.imshow(pair.name1, im1_vis_)
 
                 im2_vis = np.concatenate((pair.img2[..., f], pair.img2[..., f]), axis=1)
                 im2_vis = normalize_image(im2_vis) * 255
-                im2_vis = cv2.UMat(np.stack([im2_vis.astype(np.uint8)]*3, axis=-1))
+                im2_vis_ = cv2.UMat(np.stack([im2_vis.astype(np.uint8)]*3, axis=-1))
                 p1 = line_im2[:, 0].round().astype(int)
                 p2 = line_im2[:, -1].round().astype(int)
-                cv2.line(im2_vis, (p1[1], p1[0],), ( p2[1], p2[0],), (0,255,0))
-                cv2.imshow(pair.name2, im2_vis)
+                cv2.line(im2_vis_, (p1[1], p1[0],), ( p2[1], p2[0],), (0,255,0))
+                im2_vis_ = cv2.resize(im2_vis_, (im2_vis.shape[1] * scaling, im2_vis.shape[0] * scaling))
+                cv2.imshow(pair.name2, im2_vis_)
 
                 cv2.waitKey()
 
