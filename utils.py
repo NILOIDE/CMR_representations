@@ -39,30 +39,19 @@ def normalize_image_with_mean_lv_value(im: Union[np.ndarray, torch.Tensor], mean
 
 
 @dataclass
-class SubjectSlices:
-    sax: List[np.ndarray] = None
-    la4ch: np.ndarray = None
-    la3ch: np.ndarray = None
-    la2ch: np.ndarray = None
-
-
-@dataclass
-class SubjectAffines:
-    sax: List[np.ndarray] = None
-    la4ch: np.ndarray = None
-    la3ch: np.ndarray = None
-    la2ch: np.ndarray = None
-
-
-@dataclass
 class SubjectFiles:
+    name: str = None
     sax: List[str] = None
     la4ch: str = None
     la3ch: str = None
     la2ch: str = None
+    sax_seg: List[str] = None
+    la4ch_seg: str = None
+    la3ch_seg: str = None
+    la2ch_seg: str = None
 
 
-def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> List[str]:
+def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> Tuple[List[str], List[str]]:
     sax_path = Path(sax_path)
     assert sax_path.exists()
     assert sax_path.is_file()
@@ -77,10 +66,12 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> List
     # If we assume the files have been processed correectly in the past, we can skip the process
     if skip_exist:
         files = [str(i) for i in subject_save_dir.iterdir() if i.is_file() and str(i.name)[:3] != "seg" and str(i.name)[-7:] == ".nii.gz"]
+        seg_files = [str(i) for i in subject_save_dir.iterdir() if i.is_file() and str(i.name)[:3] == "seg" and str(i.name)[-7:] == ".nii.gz"]
         if files:
             expected_total = int(files[0].split("-")[-1].split(".")[0])
             if len(files) == expected_total:
-                return files
+                assert len(files) == len(seg_files)
+                return files, seg_files
 
     # Load volumes
     sax_nii = nib.load(str(sax_path))
@@ -94,6 +85,7 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> List
     scanner_origin = sax_aff @ voxel_origin
 
     slice_files = []
+    seg_slice_files = []
     for slice_idx in range(sax_im.shape[2]):
         # Get the position of this slice's origin in scanner space
         z_from_origin = slice_idx
@@ -106,18 +98,20 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> List
         slice_affine = sax_aff.copy()
         slice_affine[:3, 3] += dist_from_vol_origin[:3]
 
-        # Save this image slice indivually
+        # Save this image slice individually
         slice_nii = nib.Nifti1Image(sax_im[:, :, slice_idx:slice_idx+1, :], slice_affine)
         slice_path = str(subject_save_dir / f"sa_{slice_idx}-{sax_im.shape[2]}.nii.gz")
         nib.save(slice_nii, slice_path)
 
-        # Save this segmentation slice indivually
+        # Save this segmentation slice individually
         seg_slice_nii = nib.Nifti1Image(seg_sax_im[:, :, slice_idx:slice_idx+1, :], slice_affine)
         seg_slice_path = str(subject_save_dir / f"seg_sa_{slice_idx}-{sax_im.shape[2]}.nii.gz")
         nib.save(seg_slice_nii, seg_slice_path)
 
         slice_files.append(slice_path)
-    return slice_files
+        seg_slice_files.append(seg_slice_path)
+    assert len(slice_files) == len(seg_slice_files)
+    return slice_files, seg_slice_files
 
 
 def find_subjects(dataset_dir: str, sax_slice_dataset_dir: str) -> List[SubjectFiles]:
@@ -132,7 +126,7 @@ def find_subjects(dataset_dir: str, sax_slice_dataset_dir: str) -> List[SubjectF
         if (subj_dir / "sa_slices").exists():
             shutil.rmtree(str(subj_dir / "sa_slices"))
         try:
-            sax_slices = split_sax_into_slices(str(sa_file), save_dir=str(sax_slice_dataset_dir / subj_dir.name / "sa_slices"))
+            sax_slices, seg_sax_slices = split_sax_into_slices(str(sa_file), save_dir=str(sax_slice_dataset_dir / subj_dir.name / "sa_slices"))
         except Exception as e:
             continue
         la4ch = subj_dir / "la_4ch.nii.gz"
@@ -144,8 +138,17 @@ def find_subjects(dataset_dir: str, sax_slice_dataset_dir: str) -> List[SubjectF
         la2ch = subj_dir / "la_2ch.nii.gz"
         if not la2ch.exists() or not la2ch.is_file() or la2ch.stat().st_size == 0:
             continue
+        seg_la4ch = subj_dir / "seg_la_4ch.nii.gz"
+        if not seg_la4ch.exists() or not seg_la4ch.is_file() or seg_la4ch.stat().st_size == 0:
+            continue
+        seg_la3ch = subj_dir / "seg_la_3ch.nii.gz"
+        # if not seg_la3ch.exists() or not seg_la3ch.is_file() or seg_la3ch.stat().st_size == 0:
+        #     continue
+        seg_la2ch = subj_dir / "seg_la_2ch.nii.gz"
+        if not seg_la2ch.exists() or not seg_la2ch.is_file() or seg_la2ch.stat().st_size == 0:
+            continue
 
-        subj_files = SubjectFiles(sax=sax_slices, la4ch=str(la4ch), la3ch=str(la3ch), la2ch=str(la2ch))
+        subj_files = SubjectFiles(name=subj_dir.name, sax=sax_slices, la4ch=str(la4ch), la3ch=str(la3ch), la2ch=str(la2ch), sax_seg=seg_sax_slices, la4ch_seg=str(seg_la4ch), la3ch_seg=str(seg_la3ch), la2ch_seg=str(seg_la2ch))
         subject_list.append(subj_files)
     return subject_list
 
