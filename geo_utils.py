@@ -1,17 +1,16 @@
 from typing import Tuple
 
 import numpy as np
+import torch
 
 Line = Tuple[np.ndarray, np.ndarray]
 PlaneEq = np.ndarray
 
 
-def calculate_normal_vector(plane):
-    # Create the normal vector
-    normal_vector = np.array(plane[:3])
-    # Normalize the normal vector
-    normalized_vector = normal_vector / np.linalg.norm(normal_vector)
-    return normalized_vector
+def batch_normalize_vector(vec: torch.Tensor) -> torch.Tensor:
+    assert len(vec.shape) == 2
+    vec_n = vec / vec.norm(dim=-1)[:, None].tile((1, 3))
+    return vec_n
 
 
 def calculate_angle_between_planes(plane1, plane2):
@@ -26,53 +25,60 @@ def calculate_angle_between_planes(plane1, plane2):
     return angle_deg
 
 
-def get_image_plane_from_array(im, affine):
-    points = get_3_points_from_slice(im, affine)
-    return get_image_plane(points)
+def get_image_plane_from_array(affines):
+    points_voxel_space = torch.tensor([[0., 0., 0., 1.],
+                                       [1., 0., 0., 1.],
+                                       [0., 1., 0., 1.]
+                                       ], dtype=torch.float32)
+    points_voxel_space = torch.tile(points_voxel_space, (affines.shape[0], 1))
+    affines_ = torch.repeat_interleave(affines, 3, dim=0)
+    points_scanner_space = torch.einsum("ijk,ik->ij", [affines_, points_voxel_space]).reshape(affines.shape[0], 3, -1)
+    return get_image_plane(points_scanner_space)
 
 
-def get_image_plane(points) -> PlaneEq:
-    assert len(points) == 3
-    # Create a matrix A from the coordinates
-    A = np.vstack(points)
-    # Create a vector B with ones
-    B = np.ones(3)
-    # Solve the linear equation Ax = B
-    x = np.linalg.solve(A, B)
-    # Extract the coefficients of the plane equation
-    a, b, c = x
-    # Compute the constant term d
-    d = -np.dot(x, points[0])
+def get_image_plane(points: torch.Tensor) -> torch.Tensor:
+    assert points.shape[1] == 3 and points.shape[2] >= 3
+    # # Create a matrix A from the coordinates
+    # A = points[..., :3]
+    # # Create a vector B with ones
+    # B = torch.ones((points.shape[0], 3))
+    # # Solve the linear equation Ax = B
+    # x = torch.linalg.solve(A, B)  # TODO:
+    # # Extract the coefficients of the plane equation
+    # a, b, c = x
+    # # Compute the constant term d
+    # d = -np.dot(x, points[0])
+
+    v1 = points[:, 0, :3] - points[:, 2, :3]  # Vector 1
+    v2 = points[:, 1, :3] - points[:, 2, :3]  # Vector 2
+    normal = torch.cross(v1, v2)  # Normal to plane
+    # https://kitchingroup.cheme.cmu.edu/blog/2015/01/18/Equation-of-a-plane-through-three-points/
+    # evaluates a * x3 + b * y3 + c * z3 which equals d
+    d = torch.einsum("ij,ij->i", [normal, points[:, 0, :3]])  # dot(normal, point)
     # Return the plane equation coefficients
-    return np.array([a, b, c, d])
+    plane_eq = torch.cat((normal, d[:, None]), dim=1)  #TODO
+    return plane_eq
 
 
-def get_3_points_from_slice(im, affine):
-    center = np.array([im.shape[0]//2, im.shape[1]//2, 0, 1])
-    corner0 = np.array([0., 0., 0, 1])
-    corner1 = np.array([0., im.shape[1]//2, 0, 1])
-    center_ = affine @ center
-    corner0_ = affine @ corner0
-    corner1_ = affine @ corner1
-    return center_[:3], corner0_[:3], corner1_[:3]
-
-
-def plane_intersection(a, b):
+def plane_intersection(a: torch.Tensor, b: torch.Tensor):
     """
     a, b   4-tuples/lists
            Ax + By +Cz + D = 0
            A,B,C,D in order
     output: 2 points on line of intersection, np.arrays, shape (3,)
     """
-    a_vec, b_vec = np.array(a[:3]), np.array(b[:3])
-    aXb_vec = np.cross(a_vec, b_vec)
-    aXb_vec = aXb_vec / np.linalg.norm(aXb_vec) * 10
+    a_normal, b_normal = a[:, :3], b[:, :3]
+    dir_inter = torch.cross(a_normal, b_normal)  # Line direction
+    # aXb_vec = intersec_dir / np.linalg.norm(intersec_dir) * 10
 
-    x = (a[1] * b[3] - b[1] * a[3]) / (a[0] * b[1] - b[0] * a[1])
-    y = (b[0] * a[3] - a[0] * b[3]) / (a[0] * b[1] - b[0] * a[1])
-    point_on_line = np.array([x, y, 0])
-
-    return point_on_line, point_on_line + aXb_vec
+    # x = (a[1] * b[3] - b[1] * a[3]) / (a[0] * b[1] - b[0] * a[1])
+    # y = (b[0] * a[3] - a[0] * b[3]) / (a[0] * b[1] - b[0] * a[1])
+    # point_on_line = np.array([x, y, 0])
+    A = torch.stack([a_normal, b_normal, dir_inter], dim=1)
+    d = torch.stack([a[:, 3], b[:, 3], torch.zeros((a.shape[0],))], dim=1)
+    p_inter = torch.linalg.solve(A, d)  # TODO
+    line = torch.stack((p_inter, p_inter + dir_inter), dim=1)
+    return line
 
 
 def plane_line_intersection(plane_eq, line: Line):
@@ -91,11 +97,21 @@ def plane_line_intersection(plane_eq, line: Line):
     return inter_pt
 
 
-def closest_point_on_line(line: Line, point: np.ndarray) -> Line:
-    gradient = line[1] - line[0]
-    det = np.sum(gradient * gradient)
-    a = np.sum(gradient * (point - line[0])) / det
-    return line[0] + a * gradient
+def closest_point_on_line(line: torch.Tensor, point: torch.Tensor) -> torch.Tensor:
+    # https://blender.stackexchange.com/questions/94464/finding-the-closest-point-on-a-line-defined-by-two-points
+    assert len(line.shape) == 3
+    assert line.shape[1] == 2
+    assert line.shape[2] == 3
+    assert len(point.shape) == 2
+    assert point.shape[-1] == 3
+    direction_line = line[:, 1] - line[:, 0]
+    direction_line_n = batch_normalize_vector(direction_line)
+    direction_point = point - line[:, 0]
+    # Dot product gives us distance to projected point along line
+    dist_along_line = torch.einsum("ij,ij->i", [direction_point, direction_line_n])  # Batch-wise dot product
+    # Projected point is start of line plus (distance * direction)
+    projected_point = line[:, 0] + dist_along_line[:, None].tile((1, 3)) * direction_line_n
+    return projected_point
 
 
 def get_image_edge_planes(im, affine) -> Tuple[PlaneEq, PlaneEq, PlaneEq, PlaneEq]:

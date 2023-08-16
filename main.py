@@ -3,24 +3,24 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Union, Iterable
 import nibabel as nib
 import numpy as np
+import torch
 import tqdm
 from dataclasses import dataclass
-from scipy.ndimage import map_coordinates
 from itertools import combinations, product
 import cv2
-import random
-import pygad
 
 
-from geo_utils import get_image_plane_from_array, plane_intersection, get_image_edge_planes, plane_line_intersection,\
-    Line, PlaneEq
-from utils import SubjectFiles, find_subjects, normalize_image, \
-    normalize_image_with_mean_lv_value
+from geo_utils import get_image_plane_from_array, plane_intersection, get_image_edge_planes, plane_line_intersection, \
+    Line, PlaneEq, closest_point_on_line, batch_normalize_vector
+from utils import normalize_image, normalize_image_with_mean_lv_value, fast_trilinear_interpolation
+from data_utils import SubjectFiles, find_subjects
 from metrics import L2, L1
+
+DEVICE = "cpu"
 
 
 class OptimizableImage:
-    def __init__(self, image, affine, spacing, name, seg=None):
+    def __init__(self, image, affine, spacing, name, index, seg=None):
         self.image = image
         self.seg = seg
         self.affine = affine
@@ -30,6 +30,7 @@ class OptimizableImage:
         self.parameters = self.get_params_from_affine()  # r1, r2, r3, t1, t2, t3
         self.update_parameters()
         self.name = name
+        self.index = index
 
     def flip_rot_matrix(self, affine):
         """ Maik is a magician"""
@@ -77,50 +78,58 @@ class OptimizableImage:
         self.update_parameters(new_params)
 
 
-
-@dataclass
-class PlanePair:
-    plane1: OptimizableImage
-    plane2: OptimizableImage
-    previous_loss: Optional[float] = None
-
-
 class SubjectData:
     def __init__(self, subject: SubjectFiles):
         self.planes = []
         self.seg_planes = []
+        index = 0
         if subject.la4ch is not None:
             try:
                 nii_4ch = nib.load(subject.la4ch)
                 nii_4ch_seg = nib.load(subject.la4ch_seg)
-                self.planes.append(OptimizableImage(nii_4ch.dataobj[:].squeeze(2), nii_4ch.affine, nii_4ch.header.get_zooms()[:3], "la_4ch", seg=nii_4ch_seg.dataobj[:]))
+                self.planes.append(OptimizableImage(nii_4ch.dataobj[:].squeeze(2), nii_4ch.affine, nii_4ch.header.get_zooms()[:3], "la_4ch", index=index, seg=nii_4ch_seg.dataobj[:]))
+                index += 1
             except FileNotFoundError as e:
                 print(f"Subject {subject.name}: 4ch image not found")
         if subject.la3ch is not None:
             try:
                 nii_3ch = nib.load(subject.la3ch)
                 # nii_3ch_seg = nib.load(subject.la3ch_seg)
-                self.planes.append(OptimizableImage(nii_3ch.dataobj[:].squeeze(2), nii_3ch.affine, nii_3ch.header.get_zooms()[:3], "la_3ch"))
+                self.planes.append(OptimizableImage(nii_3ch.dataobj[:].squeeze(2), nii_3ch.affine, nii_3ch.header.get_zooms()[:3], "la_3ch", index=index))
+                index += 1
             except FileNotFoundError as e:
                 print(f"Subject {subject.name}: 3ch image not found")
         if subject.la2ch is not None:
             try:
                 nii_2ch = nib.load(subject.la2ch)
                 nii_2ch_seg = nib.load(subject.la2ch_seg)
-                self.planes.append(OptimizableImage(nii_2ch.dataobj[:].squeeze(2), nii_2ch.affine, nii_2ch.header.get_zooms()[:3], "la_2ch", seg=nii_2ch_seg.dataobj[:]))
+                self.planes.append(OptimizableImage(nii_2ch.dataobj[:].squeeze(2), nii_2ch.affine, nii_2ch.header.get_zooms()[:3], "la_2ch", index=index, seg=nii_2ch_seg.dataobj[:]))
+                index += 1
             except FileNotFoundError as e:
                 print(f"Subject {subject.name}: 2ch image not found")
-        self.idx_pairs = [*combinations(list(range(len(self.planes))), 2)]
-
+        # Index pairs for all Long-axis to Long-axis image pairs (if 2ch, 3ch, 4ch are present, that will be 3 pairs)
+        la_la_product = [*combinations(list(range(len(self.planes))), 2)]
+        # Long-axis to Short-axis image pairs combinations (if 3 LA images and N SA images, that will be 3*N pairs)
         sa_la_product = list(product(list(range(len(self.planes))), list(range(len(self.planes), len(self.planes) + len(subject.sax)))))
-        self.idx_pairs = self.idx_pairs + sa_la_product
+        self.idx_pairs = torch.tensor(la_la_product + sa_la_product)
+        # Load Short-axis planes
         for i, (sa_lice, sa_lice_seg) in enumerate(zip(subject.sax, subject.sax_seg)):
             im_nii = nib.load(sa_lice)
             im_nii_seg = nib.load(sa_lice_seg)
-            self.planes.append(OptimizableImage(im_nii.dataobj[:].squeeze(2), im_nii.affine, im_nii.header.get_zooms()[:3], f"sa{i}-{len(subject.sax)}", seg=im_nii_seg.dataobj[:]))
+            self.planes.append(OptimizableImage(im_nii.dataobj[:].squeeze(2), im_nii.affine, im_nii.header.get_zooms()[:3], f"sa{i}-{len(subject.sax)}", index=index, seg=im_nii_seg.dataobj[:]))
+            index += 1
         assert min([min(i) for i in self.idx_pairs]) == 0
         assert max([max(i) for i in self.idx_pairs]) == len(self.planes) - 1
-        self.plane_pairs = [PlanePair(plane1=self.planes[i], plane2=self.planes[j]) for i, j in self.idx_pairs]
+
+        self.images = [torch.tensor(i.image, dtype=torch.float32, device=DEVICE) for i in self.planes]
+        self.shapes = torch.stack([torch.tensor(i.shape) for i in self.images])
+        self.affines = torch.stack([torch.tensor(i.affine, dtype=torch.float32, device=DEVICE) for i in self.planes], dim=0)
+        self.spacings = torch.stack([torch.tensor(i.spacing, dtype=torch.float32, device=DEVICE) for i in self.planes], dim=0)
+        self.max_im_shape = self.shapes.amax(dim=0)
+        self.images_pad = torch.zeros((len(self.images), *self.max_im_shape))
+        for i, (im, sh) in enumerate(zip(self.images, self.shapes)):
+            self.images_pad[i, :sh[0], :sh[1]] = im
+            assert im.any(1).any(0).all()
 
         self.plane_param_size = self.planes[0].parameters.shape[0]
         self.param_size = self.plane_param_size * len(self.planes)
@@ -170,246 +179,188 @@ class SubjectData:
         return
 
 
-def find_image_border_intercepts(intersec_line_scan_space, image, affine) -> Line:
-    inverse_affine = np.linalg.inv(affine)
-    a, b = inverse_affine @ np.array([*intersec_line_scan_space[0], 1.]), inverse_affine @ np.array([*intersec_line_scan_space[1], 1.])
+def find_image_border_intercepts(intersec_lines, affines, shapes) -> torch.Tensor:
+    #https://stackoverflow.com/questions/2824478/shortest-distance-between-two-line-segments
+    # (Batch, num_corners, (xyz1))
+    corners = torch.zeros((intersec_lines.shape[0], 4, 4), dtype=torch.float32, device=DEVICE)
+    corners[..., -1] = 1.0
+    corners[:, 1, 1] = shapes[:, 0]
+    corners[:, 3, 1] = shapes[:, 0]
+    corners[:, 2, 0] = shapes[:, 1]
+    corners[:, 3, 1] = shapes[:, 1]
 
-    if np.abs(a[2]) > 1e-3 or np.abs(b[2]) > 1e-3:
-        raise ValueError("Intersection line projected onto voxel space appears to be farther from the image z plane "
-                         "than we could account for numerical imprecission. Kinda weird.... "
-                         "We are skipping this bad boy!")
-    a[2], b[2] = 0.0, 0.0
-    if a[1] == b[1]:
-        a[0], b[0] = 0.0, image.shape[0] - 1.0
-        return affine @ a, affine @ b
-    if a[0] == b[0]:
-        a[1], b[1] = 0.0, image.shape[1] - 1.0
-        return affine @ a, affine @ b
-    slope = (a[0] - b[0]) / (a[1] - b[1])
-    intercept = a[0] - slope * a[1]
-    # Calculate intersection points with each border
-    x_bottom = (0. - intercept) / slope
-    x_top = (image.shape[0] - 1 - intercept) / slope
-    y_right = slope * (image.shape[1] - 1) + intercept
-    y_left = slope * 0. + intercept
+    affines_ = torch.tile(affines[:, None], (1, 4, 1, 1))
+    # Don't know if doing this is slower but it avoids me having to reshape a bunch of times and pray the ordering is correct
+    corners_scanner_space = torch.einsum("ijkl,ijl->ijk", [affines_, corners])
+    border1 = corners_scanner_space[:, 0, :3] - corners_scanner_space[:, 1, :3]
+    border2 = corners_scanner_space[:, 1, :3] - corners_scanner_space[:, 2, :3]
+    border3 = corners_scanner_space[:, 2, :3] - corners_scanner_space[:, 3, :3]
+    border4 = corners_scanner_space[:, 3, :3] - corners_scanner_space[:, 0, :3]
+    # borders = torch.stack([border1, border2, border3, border4], dim=1)
 
-    # Check which intersection points are within the bounds of the image
-    intersection_points = []
-    if 0 <= x_bottom <= image.shape[1] - 1:  # Line crosses bottom edge
-        point1 = np.array([0., x_bottom, 0., 1.])
-        intersection_points.append(point1)
-    if 0 <= x_top <= image.shape[1] - 1:  # Line crosses top edge
-        point2 = np.array([image.shape[0]-1, x_top, 0., 1.])
-        intersection_points.append(point2)
-    # A line may intersect top and bottom, in which case, we're done looking for intersections.
-    # If not check which left/right edges are intersected
-    if len(intersection_points) < 2:
-        if 0 <= y_right <= image.shape[0] - 1:
-            # Avoid placing the same point twice if line intersects bottom-right/top-right corner
-            if x_top != image.shape[1] - 1 and x_bottom != image.shape[1] - 1:
-                point3 = np.array([y_right, image.shape[1]-1, 0., 1.])
-                intersection_points.append(point3)
-        if 0 <= y_left <= image.shape[0] - 1:
-            # Avoid placing the same point twice if line intersects bottom-left/top-left corner
-            if x_top != 0. and x_bottom != 0.:
-                point4 = np.array([y_left, 0., 0., 1.])
-                intersection_points.append(point4)
+    # Calculate denomitator
+    A = intersec_lines[:, 0] - intersec_lines[:, 1]
+    magA = A.norm(dim=-1)
+    magB1 = border1.norm(dim=-1)
+    magB2 = border2.norm(dim=-1)
+    magB3 = border3.norm(dim=-1)
+    magB4 = border4.norm(dim=-1)
 
-    # Number of intersections should be 2. Corner intersection duplicates should have been filtered out
-    if len(intersection_points) < 2:
-        raise ValueError("Image intersection is not a line. (Don't intersect at all, or intersect at a single point)")
-    assert abs(slope - (intersection_points[1][0] - intersection_points[0][0]) / (intersection_points[1][1] - intersection_points[0][1])) < 1e-3, f" {slope}, {(intersection_points[1][0] - intersection_points[0][0]) / (intersection_points[1][1] - intersection_points[0][1])}"
-    assert abs(intercept - (intersection_points[0][0] - slope * intersection_points[0][1])) < 1e-3
-    assert abs(intercept - (intersection_points[1][0] - slope * intersection_points[1][1])) < 1e-3
-    return affine @ intersection_points[0], affine @ intersection_points[1]
+    _A = A / magA[:, None].tile((1, 3))
+    _B1 = border1 / magB1[:, None].tile((1, 3))
+    _B2 = border2 / magB2[:, None].tile((1, 3))
+    _B3 = border3 / magB3[:, None].tile((1, 3))
+    _B4 = border4 / magB4[:, None].tile((1, 3))
+
+    cross1 = torch.cross(_A, _B1)
+    cross2 = torch.cross(_A, _B2)
+    cross3 = torch.cross(_A, _B3)
+    cross4 = torch.cross(_A, _B4)
+    raise NotImplementedError
 
 
-def compute_intersection_line(plane_pair: PlanePair) -> Optional[np.ndarray]:
-    try:
-        plane1 = get_image_plane_from_array(plane_pair.plane1.image, plane_pair.plane1.affine)
-        plane2 = get_image_plane_from_array(plane_pair.plane2.image, plane_pair.plane2.affine)
-        intersec_scanner_space = plane_intersection(plane1, plane2)
-        try:
-            im1_border_p1, im1_border_p2 = find_image_border_intercepts(intersec_scanner_space, plane_pair.plane1.image, plane_pair.plane1.affine)
-            im2_border_p1, im2_border_p2 = find_image_border_intercepts(intersec_scanner_space, plane_pair.plane2.image, plane_pair.plane2.affine)
-        except ValueError:
-            return None
-        im1_dir = im1_border_p2 - im1_border_p1
-        im2_p1_dir = im2_border_p1 - im1_border_p1
-        im2_p2_dir = im2_border_p2 - im1_border_p1
-        im1_dir_norm = np.linalg.norm(im1_dir)
-        im2_p1_dir_norm = np.linalg.norm(im2_p1_dir)
-        im2_p2_dir_norm = np.linalg.norm(im2_p2_dir)
+def image_center_to_scanner_space(affines: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
+    centers = torch.zeros((shapes.shape[0], 4))
+    centers[:, -1] = 1.0
+    centers[:, :2] = shapes[:, :2] / 2
 
-        if np.dot(im1_dir, im2_p1_dir) <= 0 and np.dot(im1_dir, im2_p2_dir) <= 0:
-            # Images don't overlap
-            return None
-        elif np.dot(im2_p1_dir, im1_dir) < 0 < np.dot(im1_dir, im2_p2_dir):
-            if im1_dir_norm > im2_p2_dir_norm:
-                im_intersection_line = (im1_border_p1, im1_border_p2)
-            else:
-                im_intersection_line = (im1_border_p1, im2_border_p2)
-        elif np.dot(im2_p2_dir, im1_dir) < 0 < np.dot(im1_dir, im2_p1_dir):
-            if im1_dir_norm > im2_p1_dir_norm:
-                im_intersection_line = (im1_border_p1, im1_border_p2)
-            else:
-                im_intersection_line = (im1_border_p1, im2_border_p1)
-        else:
-            if max(im2_p1_dir_norm, im2_p2_dir_norm) < im1_dir_norm:
-                im_intersection_line = (im2_border_p1, im2_border_p2)
-            elif im1_dir_norm < min(im2_p1_dir_norm, im2_p2_dir_norm):
-                # Images don't overlap
-                return None
-            elif im1_dir_norm < im2_p1_dir_norm:
-                im_intersection_line = (im2_border_p2, im1_border_p2)
-            else:
-                im_intersection_line = (im2_border_p1, im1_border_p2)
-
-        num_samples = 100
-        step_vector = im_intersection_line[1] - im_intersection_line[0]
-        step_vector = step_vector / num_samples
-        sample_line = np.array([im_intersection_line[0] + step_vector * i for i in range(num_samples)])
-        # assert sample_line.shape[0] == num_samples
-        assert sample_line.shape[1] == 4
-        assert len(sample_line.shape) == 2
-        return sample_line
-
-    except Exception as e:
-        print(f"{e} encounter between planes: {plane_pair.plane1.name}, {plane_pair.plane2.name}")
-        raise e
+    centers_scanner_space = torch.einsum("ijk,ik->ij", [affines, centers])
+    return centers_scanner_space[..., :3]
 
 
-def sample_image_along_scanner_line(sample_coords_scanner_space: np.ndarray, image: np.ndarray, affine: np.ndarray) \
-        -> Tuple[np.ndarray, np.ndarray]:
-    assert sample_coords_scanner_space.shape[1] == 4
-    assert len(sample_coords_scanner_space.shape) == 2
-    inverse_affine = np.linalg.inv(affine)
-    coords_voxel_space = inverse_affine @ sample_coords_scanner_space.T
-    coords_voxel_space = coords_voxel_space[:2]
-    sampled_points = map_coordinates(image, coords_voxel_space, mode="nearest")
-    return sampled_points, coords_voxel_space
+def find_sampling_center(image_centers1, image_centers2, intersec_lines) -> torch.Tensor:
+    centers1_on_line = closest_point_on_line(intersec_lines, image_centers1)
+    centers2_on_line = closest_point_on_line(intersec_lines, image_centers2)
+    sampling_centers = (centers1_on_line + centers2_on_line) / 2
+    return sampling_centers
 
 
-def compute_pairwise_loss(subject, frames: Iterable[int] = (0,), visualize=False) -> float:
+def compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_step_mm=5.0, num_samples=100) -> torch.Tensor:
+    """ Compute a sampling line of num_samples points along the intersection lane between all plane pairs.
+     Each line is centered on the average image centers. Each point is spaced sampling_step_mm appart. """
+    planes = get_image_plane_from_array(affines)
+    planes1, planes2 = planes[pair_indices[:, 0]], planes[pair_indices[:, 1]]
+    # We assume the plane pairs always intersect
+    intersec_scanner_space = plane_intersection(planes1, planes2)
+    # The sampling line will be centered on the average image centers projected along the intersection line
+    img_centers = image_center_to_scanner_space(affines, shapes)
+    img_centers1, img_centers2 = img_centers[pair_indices[:, 0]], img_centers[pair_indices[:, 1]]
+    sampling_centers = find_sampling_center(img_centers1, img_centers2, intersec_scanner_space)
+
+    # We sample a line along the intersection N mm at a time for num_samples/2 in each direction
+    intersec_dirs = intersec_scanner_space[:, 1] - intersec_scanner_space[:, 0]
+    step_vectors = batch_normalize_vector(intersec_dirs)
+    step_vectors_ = step_vectors[:, None].tile((1, num_samples, 1))
+    dists_from_centers = (torch.arange(0, num_samples) - num_samples // 2) * sampling_step_mm
+    dists_from_centers_ = dists_from_centers[None, :, None].tile((sampling_centers.shape[0], 1, 3))
+    sampling_centers_ = sampling_centers[:, None].tile((1, num_samples, 1))
+    sample_lines = sampling_centers_ + step_vectors_ * dists_from_centers_
+
+    assert sample_lines.shape[0] == pair_indices.shape[0]
+    assert sample_lines.shape[1] == num_samples
+    assert sample_lines.shape[2] == 3
+    return sample_lines
+
+
+def sample_image_along_scanner_line(coords_scanner_space: torch.Tensor, images: torch.Tensor,
+                                    affines: torch.Tensor, shapes: torch.Tensor) \
+        -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # Add 4th coord dimension in order to multiply by affine
+    if coords_scanner_space.shape[-1] == 3:
+        coords_scanner_space = torch.cat((coords_scanner_space, torch.ones((*coords_scanner_space.shape[:-1], 1))), dim=-1)
+    inverse_affines = torch.linalg.inv(affines)  # For (scanner space -> voxel) we need inverse affine
+    # Tile affine into (batch, num_point, 4, 4)
+    inverse_affines_ = inverse_affines[:, None].tile((1, coords_scanner_space.shape[1], 1, 1))
+    # Batch-wise dot product
+    points_voxel_space = torch.einsum("ijkl,ijl->ijk", [inverse_affines_, coords_scanner_space])
+    # Disregard z dimension, we assume it's a 2D image. Ideally z should always be ~0.0.
+    coords_voxel_space = points_voxel_space[:, :, :2]
+    # We want to sample these point along all time points in the 2D+time scan. We need to generate the time indices.
+    _, _, t = torch.meshgrid(torch.arange(0, coords_scanner_space.shape[0]),
+                             torch.arange(0, coords_scanner_space.shape[1]),
+                             torch.arange(0, images.shape[-1]))
+    # Concatenate time indices to xy coordinates
+    coords_voxel_space_t = coords_voxel_space[:, :, None].tile((1, 1, images.shape[-1], 1))
+    coords_voxel_space_t = torch.cat((coords_voxel_space_t, t[..., None]), dim=-1)
+    # Treat 2D+time images are volumes and use trilinear interpolation to extract values at each time point
+    sampled_points = fast_trilinear_interpolation(images,
+                                                  coords_voxel_space_t[..., 0].reshape((images.shape[0], -1)),
+                                                  coords_voxel_space_t[..., 1].reshape((images.shape[0], -1)),
+                                                  coords_voxel_space_t[..., 2].reshape((images.shape[0], -1)))
+    sampled_points = sampled_points.reshape((images.shape[0], coords_scanner_space.shape[1], images.shape[-1]))
+    # Create mask to deliniate which sampled points were inside/outside image.
+    shapes_ = shapes[:, None, :2].tile((1, coords_voxel_space.shape[1], 1))
+    out_mask = torch.logical_or((coords_voxel_space < 0.0).any(dim=-1),
+                                (coords_voxel_space > (shapes_ - 1)).any(dim=-1))
+    in_mask = ~out_mask
+    in_mask = in_mask[..., None].tile((1, 1, images.shape[-1]))
+    return sampled_points, in_mask, coords_voxel_space
+
+
+def compute_pairwise_loss(images, affines, pair_indices, shapes, visualize=False, names=None) -> float:
     # subject_data.update_parameters(new_params)
-    img_pairs = subject.plane_pairs
     loss = 0.
     metric = L1()
-    for f in frames:
-        loss_frame = 0.
-        for i, pair in enumerate(img_pairs):
-            sample_coords_scanner_space = compute_intersection_line(pair)
-            if sample_coords_scanner_space is None:
-                return np.Inf
-            sampled_im1, line_im1 = sample_image_along_scanner_line(sample_coords_scanner_space.copy(), pair.plane1.image[..., f], pair.plane1.affine)
-            sampled_im2, line_im2 = sample_image_along_scanner_line(sample_coords_scanner_space.copy(), pair.plane2.image[..., f], pair.plane2.affine)
-            loss_pair = metric(sampled_im1, sampled_im2)
-            pair.previous_loss = loss_pair
-            loss_frame += loss_pair
+    sample_coords_scanner_space = compute_intersection_sampling_line(affines, pair_indices, shapes)
+    images1, images2 = images[pair_indices[:, 0]], images[pair_indices[:, 1]]
+    affines1, affines2 = affines[pair_indices[:, 0]], affines[pair_indices[:, 1]]
+    shapes1, shapes2 = shapes[pair_indices[:, 0]], shapes[pair_indices[:, 1]]
+    sampled_im1, sample_mask1, line_im1 = sample_image_along_scanner_line(sample_coords_scanner_space, images1, affines1, shapes1)
+    sampled_im2, sample_mask2, line_im2 = sample_image_along_scanner_line(sample_coords_scanner_space, images2, affines2, shapes2)
+    loss = metric(sampled_im1, sampled_im2, mask1=sample_mask1, mask2=sample_mask2)
 
-            if visualize:
-                # Visualize
-                scaling = 8
-                cat_line = normalize_image_with_mean_lv_value(np.stack((sampled_im1, np.zeros_like(sampled_im1), sampled_im2), axis=0)) * 255
-                cat_line = cv2.UMat(cat_line.astype(np.uint8))
-                cat_line = cv2.resize(cat_line, (sampled_im1.shape[0] * scaling, 3 * scaling))
-                cv2.imshow(pair.plane1.name + "_" + pair.plane2.name + "_line", cat_line)
+    if visualize:
+        # Visualize
+        for i in range(pair_indices.shape[0]):
+            idx1, idx2 = pair_indices[i, 0], pair_indices[i, 1]
+            name1, name2 = "im1", "im2"
+            if names is not None:
+                name1, name2 = names[idx1], names[idx2]
+            scaling = 24
+            im1_vis = normalize_image_with_mean_lv_value(sampled_im1[i, ..., 0].cpu().detach().numpy())
+            im1_vis_rgb = np.stack([im1_vis]*3, axis=-1)
+            im2_vis = normalize_image_with_mean_lv_value(sampled_im2[i, ..., 0].cpu().detach().numpy())
+            im2_vis_rgb = np.stack([im2_vis]*3, axis=-1)
+            mask = torch.logical_and(sample_mask1[i, ..., 0], sample_mask2[i, ..., 0]).float().numpy()
+            mask_rgb = np.stack([np.zeros_like(mask), mask, 1-mask], -1)
+            cat_line = np.stack((im1_vis_rgb, np.zeros_like(mask_rgb), mask_rgb, np.zeros_like(mask_rgb), im2_vis_rgb), axis=0) * 255
+            cat_line = cv2.UMat(cat_line.astype(np.uint8))
+            cat_line = cv2.resize(cat_line, (sampled_im1.shape[0] * scaling, 3 * scaling))
+            cv2.imshow(name1 + "_" + name2 + "_line", cat_line)
 
-                scaling = 3
-                im1_vis = pair.plane1.image[..., f]
-                # im1_vis = np.concatenate((pair.plane1.image[..., f], pair.plane1.image[..., f]), axis=1)
-                im1_vis = normalize_image(im1_vis) * 255
-                im1_vis_ = cv2.UMat(np.stack([im1_vis.astype(np.uint8)]*3, axis=-1))
-                p1 = line_im1[:, 0].round().astype(int)
-                p2 = line_im1[:, -1].round().astype(int)
-                cv2.line(im1_vis_, (p1[1], p1[0],), (p2[1], p2[0],), (0,255,0))
-                im1_vis_ = cv2.resize(im1_vis_, (im1_vis.shape[1] * scaling, im1_vis.shape[0] * scaling))
-                cv2.imshow(pair.plane1.name, im1_vis_)
+            scaling = 3
+            im1_vis = images[idx1, ..., 0].cpu().detach().numpy()
 
-                im2_vis = pair.plane2.image[..., f]
-                # im2_vis = np.concatenate((pair.plane2.image[..., f], pair.plane2.image[..., f]), axis=1)
-                im2_vis = normalize_image(im2_vis) * 255
-                im2_vis_ = cv2.UMat(np.stack([im2_vis.astype(np.uint8)]*3, axis=-1))
-                p1 = line_im2[:, 0].round().astype(int)
-                p2 = line_im2[:, -1].round().astype(int)
-                cv2.line(im2_vis_, (p1[1], p1[0],), ( p2[1], p2[0],), (0,255,0))
-                im2_vis_ = cv2.resize(im2_vis_, (im2_vis.shape[1] * scaling, im2_vis.shape[0] * scaling))
-                cv2.imshow(pair.plane2.name, im2_vis_)
+            im2_vis = images[idx2, ..., 0].cpu().detach().numpy()
+            im_vis = np.concatenate((im1_vis, im2_vis), axis=1)
+            im_vis = normalize_image(im_vis) * 255
+            im_vis_ = cv2.UMat(np.stack([im_vis.astype(np.uint8)]*3, axis=-1))
+            for j in range(line_im1.shape[1]-1):
+                p1 = line_im1[i, j, :2].cpu().numpy().round().astype(int)
+                p2 = line_im1[i, j+1, :2].cpu().numpy().round().astype(int)
+                c = (0,255,0) if sample_mask1[i, j, 0] else (0, 0, 255)
+                cv2.line(im_vis_,
+                         (p1[1], p1[0],),
+                         (p2[1], p2[0],),
+                         c)
+            for j in range(line_im1.shape[1]-1):
+                p1 = line_im2[i, j, :2].cpu().numpy().round().astype(int)
+                p2 = line_im2[i, j+1, :2].cpu().numpy().round().astype(int)
+                c = (0,255,0) if sample_mask1[i, j, 0] else (0, 0, 255)
+                cv2.line(im_vis_,
+                         (p1[1] + images.shape[2], p1[0],),
+                         (p2[1] + images.shape[2], p2[0],),
+                         c)
+            im_vis_ = cv2.resize(im_vis_, (im2_vis.shape[1] * scaling * 2, im2_vis.shape[0] * scaling))
+            cv2.imshow(name1 + "_" + name2, im_vis_)
 
-                cv2.waitKey()
+            cv2.waitKey()
 
-        loss += loss_frame
     return loss
 
 
-def fitness_func(ga_instance, solution, solution_idx):
-    subj = deepcopy(subject_data)
-    subj.modify_parameters(np.array(solution))
-    loss = compute_pairwise_loss(subj, visualize=False)
-    return -loss
-
-
-def on_generation(ga_instance: pygad.GA):
-    subj = deepcopy(subject_data)
-    subj.modify_parameters(np.array(ga_instance.best_solutions[0]))
-    best_loss = compute_pairwise_loss(subj)
-    print(f"\rIteration:  {ga_instance.generations_completed}    Best loss:  {best_loss}", end="")
-
-
 def optimize_affines(subject: SubjectData, save_dir: str):
-    std = np.array([0.01] * (subject_data.plane_param_size - 3) + [2.0] * 3)
-    std = np.concatenate([std] * len(subject_data.planes), axis=0)
-    max_param_dist = np.array([0.3] * (subject_data.plane_param_size - 3) + [20.0] * 3)
-    max_param_dist = np.concatenate([max_param_dist] * len(subject_data.planes), axis=0)
-    og_loss = compute_pairwise_loss(subject_data)
-    prev_loss = og_loss
-    assert prev_loss != np.Inf
-    initial_pop = np.random.uniform(low=-std, high=std, size=(100, std.shape[0])).clip(-max_param_dist, max_param_dist)
-    initial_pop = np.concatenate([initial_pop, np.zeros(initial_pop[:1].shape)], axis=0)
-
-    ga_instance = pygad.GA(num_generations=1000,
-                           num_parents_mating=10,
-                           parent_selection_type="rank",
-                           fitness_func=fitness_func,
-                           initial_population=initial_pop,
-                           parallel_processing=None,
-                           random_mutation_min_val=-max_param_dist/10,
-                           random_mutation_max_val=max_param_dist/10,
-                           on_generation=on_generation,
-                           save_best_solutions=True,
-                           gene_space=[{"low": i, "high": j} for i, j in zip(-max_param_dist, max_param_dist)],
-                           keep_elitism=1,
-                           )
-    ga_instance.run()
-    best_params = np.array(ga_instance.best_solutions[0])
-    # for i in range(10000):
-    #     param_delta = np.random.normal(0.0, scale=std, size=(100, std.shape[0]))
-    #     new_params = current_params + param_delta
-    #     new_params = np.clip(new_params, og_params - max_param_dist, og_params + max_param_dist)
-    #     loss = compute_pairwise_loss(new_params)
-    #     if loss < prev_loss or random.uniform(0., 1.) < prob:
-    #         if loss < prev_best_loss:
-    #             prev_best_params = subject_data.parameters.copy()
-    #             prev_best_loss = loss
-    #             print(f"New best params found!   Iter: {i}    Loss: {prev_loss}")
-    #         prev_loss = loss
-    #         current_params = subject_data.parameters.copy()
-    #     if prob > min_prob:
-    #         prob = p_decay_func(prob)
-    #     if i < std_decay_stop_iter:
-    #         std = std_decay_func(std)
-    #     if i % 10 == 0:
-    #         print(f"Iter: {i:06d}    Prob: {prob:.6f}    Std: ({std[0]:.6f}, {std[-1]:.6f})    Original loss: {og_loss:.6f}    Best loss: {prev_best_loss:.6f}    Loss: {loss:.6f}", end="\r")
-    #
-    # print(f"Iter: {i:06d}    Prob: {prob:.6f}    Std: ({std[0]:.6f}, {std[-1]:.6f})    Original loss: {og_loss:.6f}    Best loss: {prev_best_loss:.6f}")
-    subject_data.modify_parameters(best_params)
-    final_loss = compute_pairwise_loss(subject_data)
-    print(f"\nOriginal loss: {og_loss}     Final loss: {final_loss}")
-    for og, new in zip(subject_data_og.planes, subject_data.planes):
-        param_diff = og.parameters - new.parameters
-        print(og.name, param_diff)
-    subject_data.save_niftis(save_dir)
-    compute_pairwise_loss(subject_data, visualize=True)
+    raise NotImplementedError
 
 
 if __name__ == '__main__':
@@ -419,9 +370,8 @@ if __name__ == '__main__':
     subject_list = find_subjects(download_dir, sax_unregistered_dataset_dir)
     for sub in subject_list[9:]:
         subject_data = SubjectData(sub)
-        # subject_data.modify_parameters(np.random.uniform(0, 0.1, size=subject_data.parameters.shape))
         subject_data_og = SubjectData(sub)
-        print(f"Starting loss: {compute_pairwise_loss(subject_data, visualize=True)}")
+        print(f"Starting loss: {compute_pairwise_loss(subject_data.images_pad, subject_data.affines, subject_data.idx_pairs, subject_data.shapes, visualize=True)}")
 
         optimize_affines(subject_data, str(Path(registered_dataset_dir) / sub.name))
 
