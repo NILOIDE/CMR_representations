@@ -56,7 +56,8 @@ def fast_trilinear_interpolation(input_array: torch.Tensor,
     y = x_indices - y0
     z = z_indices - z0
 
-    b, _ = torch.meshgrid(torch.arange(0, x.shape[0]), torch.arange(0, x.shape[1]), )
+    b, _ = torch.meshgrid(torch.arange(0, x.shape[0], device=x.device),
+                          torch.arange(0, x.shape[1], device=x.device))
     b_ = b.reshape(-1)
     x0_ = x0.reshape(-1)
     x1_ = x1.reshape(-1)
@@ -79,3 +80,73 @@ def fast_trilinear_interpolation(input_array: torch.Tensor,
     )
     output = output_.reshape(x0.shape)
     return output
+
+
+def flip_affine(affines, needs_flip):
+    # If the original affine had a determinant is <= 0, it is an umproper affine matrix and it needs to be flipped
+    needs_flip = needs_flip[:, None, None].repeat((1, 4, 4))
+    flip = torch.eye(3, dtype=affines.dtype, device=affines.device)
+    flip[0, 0] = -1
+    flip = flip.repeat((affines.shape[0], 1, 1))
+    affines_flipped = affines.clone()
+    affines_flipped[:, :3, :3] = torch.bmm(flip, affines[:, :3, :3])
+    affines_flipped[:, :3, 3:] = torch.bmm(flip, affines[:, :3, 3:])
+    affines = torch.where(needs_flip, affines_flipped, affines)
+    return affines
+
+
+def mat_to_params(affines, spacings, needs_flip, cy_thresh=1e-3):
+    affines = flip_affine(affines, needs_flip)
+    affines[:, :3, :3] = torch.bmm(affines[:, :3, :3], torch.diag_embed(1 / spacings))
+    translation = affines[:, :3, 3]
+
+    # The rotation euler params are extracted following nibabel's mat2euler
+    cy = torch.sqrt(affines[:, 2, 2] * affines[:, 2, 2] + affines[:, 1, 2] * affines[:, 1, 2])  # math.sqrt(r33 * r33 + r23 * r23)
+
+    z = torch.atan2(-affines[:, 0, 1], affines[:, 0, 0])
+    y = torch.atan2(affines[:, 0, 2], cy)
+    x = torch.atan2(-affines[:, 1, 2], affines[:, 2, 2])
+
+    z_eps = torch.atan2(-affines[:, 1, 0], affines[:, 1, 1])
+    x_eps = torch.zeros_like(x)
+
+    z = torch.where(cy > cy_thresh, z, z_eps)
+    x = torch.where(cy > cy_thresh, x, x_eps)
+    rotation = torch.stack((z, y, x), dim=1)
+
+    params = torch.cat((rotation, translation), 1)
+    return params
+
+
+def params_to_mat(params, spacings, needs_flip):
+    assert params.shape[1] == 6
+    rotation, translation = params[:, :3], params[:, 3:]
+    cos = torch.cos(rotation)
+    sin = torch.sin(rotation)
+    rotation_z = torch.eye(3, dtype=params.dtype, device=params.device).repeat((params.shape[0], 1, 1))
+    rotation_z[:, 0, 0] = cos[:, 0]
+    rotation_z[:, 0, 1] = -sin[:, 0]
+    rotation_z[:, 1, 0] = sin[:, 0]
+    rotation_z[:, 1, 1] = cos[:, 0]
+
+    rotation_y = torch.eye(3, dtype=params.dtype, device=params.device).repeat((params.shape[0], 1, 1))
+    rotation_y[:, 0, 0] = cos[:, 1]
+    rotation_y[:, 0, 2] = sin[:, 1]
+    rotation_y[:, 2, 0] = -sin[:, 1]
+    rotation_y[:, 2, 2] = cos[:, 1]
+
+    rotation_x = torch.eye(3, dtype=params.dtype, device=params.device).repeat((params.shape[0], 1, 1))
+    rotation_x[:, 1, 1] = cos[:, 2]
+    rotation_x[:, 1, 2] = -sin[:, 2]
+    rotation_x[:, 2, 1] = sin[:, 2]
+    rotation_x[:, 2, 2] = cos[:, 2]
+
+    rotation = torch.bmm(rotation_x, rotation_y)
+    rotation = torch.bmm(rotation, rotation_z)
+    rotation = torch.bmm(rotation, torch.diag_embed(spacings))
+
+    affines = torch.eye(4, dtype=params.dtype, device=params.device).repeat((params.shape[0], 1, 1))
+    affines[:, :3, :3] = rotation
+    affines[:, :3, 3] = translation
+    affines = flip_affine(affines, needs_flip)
+    return affines
