@@ -20,10 +20,10 @@ def normalize_image_with_percentile(im: Union[np.ndarray, torch.Tensor], percent
     """ Normalize array to range [0, Nth percentile] """
     min_, max_ = 0.0, np.percentile(im, percentile)
     im_ = (im - min_) / (max_ - min_)
-    return im_
+    return im_.clip(0.0, 1.0)
 
 
-def normalize_image_with_mean_lv_value(im: Union[np.ndarray, torch.Tensor], mean_value=MEAN_SAX_LV_VALUE, target_value=0.4) -> Union[np.ndarray, torch.Tensor]:
+def normalize_image_with_mean_lv_value(im: Union[np.ndarray, torch.Tensor], mean_value=MEAN_SAX_LV_VALUE, target_value=0.5) -> Union[np.ndarray, torch.Tensor]:
     """ Normalize such that LV pool has value of 0.5. Assumes min value is 0.0. """
     return im / (mean_value / target_value)
 
