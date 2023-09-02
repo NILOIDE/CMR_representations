@@ -150,3 +150,13 @@ def params_to_mat(params, spacings, needs_flip):
     affines[:, :3, 3] = translation
     affines = flip_affine(affines, needs_flip)
     return affines
+
+
+def make_masked_coordinate_tensor(mask):
+    """Make a coordinate tensor."""
+    coordinate_tensor = [torch.arange(0, i) for i in mask.shape]
+    coordinate_tensor = torch.meshgrid(*coordinate_tensor, indexing="ij")
+    coordinate_tensor = torch.stack(coordinate_tensor, dim=len(mask.shape))
+    coordinate_tensor = coordinate_tensor.reshape([np.prod(mask.shape), len(mask.shape)])
+    coordinate_tensor = coordinate_tensor[mask.flatten(), :]
+    return coordinate_tensor

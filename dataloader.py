@@ -8,15 +8,15 @@ from torch.utils.data import Dataset, DataLoader, random_split
 import lightning.pytorch as pl
 import pickle
 import os
-
+import h5py
 from tqdm import tqdm
 
-from utils import normalize_image_with_percentile, mat_to_params
+from utils import normalize_image_with_percentile, mat_to_params, make_masked_coordinate_tensor
 
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self, load_la_dir: str = r"D:\UKBB_subjects", load_sa_dir: str = r"D:\UKBB_subjects_unaligned",
-                 batch_size: int = 32, num_coords: int = 4000):
+                 batch_size: int = 32, num_coords: int = 4000, num_workers: int = 0):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
@@ -32,8 +32,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.num_val = 10
         self.num_test = 10
         self.max_slices = -1
-        self.num_workers = 0#min(self.batch_size, 8)
-        # self.setup("fit")
+        self.num_workers = num_workers
 
     def setup(self, stage: str, pickle_name=None):
         num_subjects = self.num_train + self.num_val + self.num_test
@@ -57,9 +56,9 @@ class CMRDataModule(pl.LightningDataModule):
         self.test_dset = CardiacUKBB([subject_data[i] for i in test_idxs],
                                      num_coords=self.num_coords)
 
-        self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
-        self._val_dataloader = DataLoader(self.val_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True)
-        self._test_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True)
+        self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
+        self._val_dataloader = DataLoader(self.val_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
+        self._test_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
 
     def get_coord_size(self) -> int:
         return self.train_dset.coord_size
@@ -115,17 +114,8 @@ class CMRDataModule(pl.LightningDataModule):
 
         return subject_data_paths, max_slices
 
-    @staticmethod
-    def make_masked_coordinate_tensor(mask):
-        """Make a coordinate tensor."""
-        coordinate_tensor = [torch.arange(0, i) for i in mask.shape]
-        coordinate_tensor = torch.meshgrid(*coordinate_tensor, indexing="ij")
-        coordinate_tensor = torch.stack(coordinate_tensor, dim=len(mask.shape))
-        coordinate_tensor = coordinate_tensor.reshape([np.prod(mask.shape), len(mask.shape)])
-        coordinate_tensor = coordinate_tensor[mask.flatten(), :]
-        return coordinate_tensor
-
-    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices, store_path=r"D:\UKBB_subjects_unaligned"):
+    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices,
+                                store_path=r"D:\UKBB_subjects_unaligned", replace_existing=True):
         store_path = Path(store_path)
         prepr_data_paths = []
         for subj_slices in tqdm(subj_paths, desc="Preprocessing subject data into torch tensor."):
@@ -168,7 +158,7 @@ class CMRDataModule(pl.LightningDataModule):
             for i, im in enumerate(images):
                 im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze(2)
                 im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
-            non_padding_indices = self.make_masked_coordinate_tensor(im_pad_mask)
+            non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
 
             # Get max and min coordinates across subject's slices
             subj_coord_max = torch.concatenate((torch.amax(torch.stack(coord_max, dim=0), dim=0), torch.tensor([50])))
@@ -190,10 +180,20 @@ class CMRDataModule(pl.LightningDataModule):
             # Store preprocessed arrays to disk
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / "prep_data.pkl"
-            with open(str(save_path), 'wb') as handle:
-                pickle.dump([im_pad, non_padding_indices, subj_coord_max, subj_coord_min,
-                             aff_params_padded, spacings_padded, needs_flip_padded],
-                            handle, protocol=pickle.HIGHEST_PROTOCOL)
+            if save_path.exists():
+                os.remove(str(save_path))
+            save_path = store_path / subject_id / "prep_data.h5"
+            if save_path.exists() and replace_existing:
+                os.remove(str(save_path))
+            while not save_path.exists() or save_path.stat().st_size < 100:
+                with h5py.File(save_path, 'w') as f:
+                    f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
+                    f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
+                    f.create_dataset('coord_max', data=subj_coord_max.numpy(), compression=1)
+                    f.create_dataset('coord_min', data=subj_coord_min.numpy(), compression=1)
+                    f.create_dataset('aff_params_padded', data=aff_params_padded.numpy(), compression=1)
+                    f.create_dataset('spacings_padded', data=spacings_padded.numpy(), compression=1)
+                    f.create_dataset('flippings_padded', data=needs_flip_padded.numpy(), compression=1)
             prepr_data_paths.append(str(save_path))
 
         return prepr_data_paths
@@ -212,29 +212,48 @@ class CardiacUKBB(Dataset):
     def __len__(self):
         return len(self.data_paths)
 
-    def load_subject_data(self, subj_idx: int, **kwargs) \
+    def load_subject_data(self, subj_idx: int, frame_idx: Optional[int] = None, **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Load image and segmentation files and undersample them according to hold-out rates.
         :param subj_idx: Index of subject in dataset list.
         """
-        with open(self.data_paths[subj_idx], 'rb') as handle:
-            subject_data = pickle.load(handle)
-        im_pad, non_padding_indices, subj_coord_max, subj_coord_min, \
-            aff_params_padded, spacings_padded, needs_flip_padded = subject_data
-        return im_pad, non_padding_indices, subj_coord_max, subj_coord_min, \
-            aff_params_padded, spacings_padded, needs_flip_padded
+        if frame_idx is None:
+            selected_frame = np.random.randint(0, 50)
+        else:
+            selected_frame = frame_idx
+
+        with h5py.File(self.data_paths[subj_idx], 'r') as f:
+            # Load only the randomly selected image frame from the (time, slices, H, W) volume
+            image = torch.tensor(f['image_padded'][selected_frame], dtype=torch.float32)
+            # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
+            image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
+            # Get available non-padding indices in frame
+            non_padding_indices = make_masked_coordinate_tensor(image_mask)
+            # Sample num_coords amount of indices that our batch will consist of
+            indices_sample = torch.randint(0, non_padding_indices.shape[0], (self.num_coords,))
+            indices = non_padding_indices[indices_sample]
+            # Add the time index to get the full volume index
+            full_indices = torch.cat((indices, torch.full((indices.shape[0], 1), selected_frame)), dim=1)
+            # Get image values at the indices samples
+            image_values_sample = image[tuple(indices.T)]
+            # Load in the max/min coord values of volume (used for coord normalization)
+            coord_max = torch.tensor(f['coord_max'][:], dtype=torch.float32)
+            coord_min = torch.tensor(f['coord_min'][:], dtype=torch.float32)
+            # Load in affine-related data
+            aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32)
+            spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
+            flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
+        return image_values_sample, full_indices, coord_max, coord_min, \
+            aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
         # Load image and seg data
-        im_pad_mask, non_padding_indices, min_coords, max_coords, \
+        img_values, indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx)
-        # Sample random points in the image volume
-        indices_sample = np.random.randint(0, non_padding_indices.shape[0], self.num_coords)
-        indices = non_padding_indices[indices_sample]
-        img_values = im_pad_mask[tuple(indices.T)]
-        voxel_indices = indices[:, 1:]
-        voxel_indices = np.concatenate((voxel_indices[:, :2], np.zeros_like(voxel_indices[:, :1]), voxel_indices[:, -1:]), axis=1)
-        slice_indices = indices[:, :1]
+
+        # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
+        voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
+        slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         sub_idx = torch.tensor(idx, dtype=torch.long)
         return voxel_indices, img_values, aff_params_padded, spacings_padded, needs_flip_padded, \

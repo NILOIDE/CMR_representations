@@ -134,7 +134,8 @@ class INR(pl.LightningModule):
         self.recon_loss = torch.nn.MSELoss()
         self.weight_reg_inr = 1e-5
         self.weight_reg_aff = 1e-3
-        self.weight_reg_deform = 1e-3
+        self.weight_reg_deform = 0.0 #1e-3
+        self.weight_reg_latent = 1e-3
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.model.parameters(), *self.recon_layer.parameters()], lr=1e-3)
@@ -152,6 +153,11 @@ class INR(pl.LightningModule):
             loss_reg_inr = loss_reg_inr * self.weight_reg_inr
             loss_reg += loss_reg_inr
             loss_dict["loss_reg_inr"] = loss_reg_inr
+        if self.weight_reg_latent:
+            loss_reg_latent = self.subject_latents[subj_idx]
+            loss_reg_latent = loss_reg_latent * self.weight_reg_latent
+            loss_reg += loss_reg_latent
+            loss_dict["loss_reg_latent"] = loss_reg_latent
         if self.weight_reg_aff:
             loss_reg_aff = nn.functional.mse_loss(self.aff_deform_params[subj_idx],
                                                   torch.zeros_like(self.aff_deform_params[subj_idx]))
@@ -167,15 +173,19 @@ class INR(pl.LightningModule):
         loss_dict["loss_reg"] = loss_reg
         return loss_reg, loss_dict
 
-    def training_step(self, batch):
-        opt_inr, opt_aff = self.optimizers()
+    def forward(self, coords_voxel, aff_params, spacings, needs_flip,
+                subject_idx, slice_idx, min_coords, max_coords):
+        world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
+                                                subject_idx, slice_idx, min_coords, max_coords)
+        values_pred = self.forward_inr(world_coords, subject_idx)
+        return values_pred
 
-        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+    def forward_coord_model(self, coords_voxel, aff_params, spacings, needs_flip,
+                subject_idx, slice_idx, min_coords, max_coords):
         # coord_deform_inr = self.coord_deform_inrs[subject_idx]
         # coord_deform_inr = coord_deform_inr.cuda()
 
         # coords_voxel = coords_voxel + coord_deform_inr(coords_voxel, slice_idx)
-
         aff_params_deform = aff_params + self.aff_deform_params[subject_idx]
         aff_params_deform_ = aff_params_deform.reshape((-1, aff_params_deform.shape[-1]))
         spacings_ = spacings.reshape((-1, spacings.shape[-1]))
@@ -184,33 +194,55 @@ class INR(pl.LightningModule):
         affines = affines_.reshape((aff_params.shape[0], aff_params.shape[1], 4, 4))
 
         # In order to move coords from voxel space to world space, we need to have them in (x, y, z, 1)
-        coords_flat = coords_voxel.reshape((-1, coords_voxel.shape[-1])).to(torch.float32)
-        time_coord = coords_flat[:, -1:]  # We take out time coordinates. We will replace them back in later.
-        spatial_coord = torch.cat((coords_flat[:, :-1], torch.ones_like(time_coord)), dim=1)  # Moving coords to world space requires (x, y, z, 1)
-        spatial_coord = spatial_coord
+        coords_flat_ = coords_voxel.reshape((-1, coords_voxel.shape[-1])).to(torch.float32)
+        time_coord_ = coords_flat_[:, -1:]  # We take out time coordinates. We will replace them back in later.
+        spatial_coord_ = torch.cat((coords_flat_[:, :-1], torch.ones_like(time_coord_)), dim=1)  # Moving coords to world space requires (x, y, z, 1)
 
         # Create indixing tensor to keep track of which batch is each coordinate coming from
         b, _ = torch.meshgrid(torch.arange(0, slice_idx.shape[0]), torch.arange(0, slice_idx.shape[1]))
         # Get affines corresponding to each coordinate
-        affines_flat = affines[b.reshape(-1), slice_idx.reshape(-1)]
+        affines_ = affines[b.reshape(-1), slice_idx.reshape(-1)]
         # Move coordinates to world space
-        coords_world = torch.bmm(affines_flat, spatial_coord[..., None])
-        coords_world = coords_world.squeeze(-1)
+        coords_world_ = torch.bmm(affines_, spatial_coord_[..., None])
+        coords_world_ = coords_world_.squeeze(-1)
         # Add time coordinate back
-        coords_world[:, -1:] = time_coord
-
-        # Get a subject latent for each coordinate
-        subject_idx_ = subject_idx[:, None].tile((1, coords_voxel.shape[1]))
-        subject_latent = self.subject_latents[subject_idx_].reshape(coords_world.shape[0], -1)
+        coords_world_[:, -1:] = time_coord_
 
         # normalize coordinates [-1, 1]
-        norm_coords = self.min_max_scale(coords_world, min_coords[b.reshape(-1)], max_coords[b.reshape(-1)], s_min=-1, s_max=1)
+        norm_coords_ = self.min_max_scale(coords_world_, min_coords[b.reshape(-1)], max_coords[b.reshape(-1)],
+                                          s_min=-1, s_max=1)
+        norm_coords = norm_coords_.reshape(coords_voxel.shape)
+        return norm_coords
 
-        x = torch.cat((norm_coords, subject_latent), dim=1)
-        features = self.model(x)
-        values_pred = self.recon_layer(features)
-        values_ = values.reshape(-1, 1)
-        loss_recon = self.recon_loss(values_pred, values_)
+    def forward_inr(self, coords, subject_idx):
+        # Get a subject latent for each coordinate
+        subject_latent = self.subject_latents[subject_idx]
+        subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
+        x = torch.cat((coords, subject_latent), dim=-1)
+        # Forward INR to obtain predicted volume values
+        x_ = x.reshape((-1, x.shape[-1]))
+        features_ = self.model(x_)
+        values_pred_ = self.recon_layer(features_)
+        values_pred = values_pred_.reshape((coords.shape[0], coords.shape[1]))
+        return values_pred
+
+    def forward_value_deform(self, coords_voxel, values, subject_idx, slice_idx):
+        # int_deform_inr = self.int_deform_inrs[subject_idx]
+        # int_deform_inr = int_deform_inr.cuda()
+
+        # values = values + int_deform_inr(coords_voxel, slice_idx)
+        return values
+
+    def training_step(self, batch):
+        opt_inr, opt_aff = self.optimizers()
+
+        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+
+        coords_world = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
+                                                subject_idx, slice_idx, min_coords, max_coords)
+        values_pred = self.forward_inr(coords_world, subject_idx)
+        values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
+        loss_recon = self.recon_loss(values_pred, values_deform)
 
         loss_reg, loss_reg_dict = self.regularization_criterion(subject_idx)
         loss = loss_recon + loss_reg
@@ -229,11 +261,10 @@ class INR(pl.LightningModule):
         return (X - x_min) / (x_max - x_min) * (s_max - s_min) + s_min
 
 
-
 @dataclass
 class Params:
     check_val_every_n_epoch: int = 10
-    num_hidden_layers: int = 3
+    num_hidden_layers: int = 4
     hidden_size: int = 64
     max_epochs: int = 1000
     siren_factor: float = 50.0
@@ -249,7 +280,7 @@ def main(work_dir, wandb_disabled="true"):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     data_module = CMRDataModule(load_la_dir=r"D:\UKBB_subjects", load_sa_dir=r"D:\UKBB_subjects_unaligned",
-                                batch_size=4, num_coords=4000)
+                                batch_size=4, num_coords=4000, num_workers=4)
     data_module.setup(stage="fit")
 
     coord_size = data_module.get_coord_size()
