@@ -154,7 +154,8 @@ class INR(pl.LightningModule):
             loss_reg += loss_reg_inr
             loss_dict["loss_reg_inr"] = loss_reg_inr
         if self.weight_reg_latent:
-            loss_reg_latent = self.subject_latents[subj_idx]
+            loss_reg_latent = nn.functional.mse_loss(self.subject_latents[subj_idx],
+                                                     torch.zeros_like(self.subject_latents[subj_idx]))
             loss_reg_latent = loss_reg_latent * self.weight_reg_latent
             loss_reg += loss_reg_latent
             loss_dict["loss_reg_latent"] = loss_reg_latent
