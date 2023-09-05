@@ -104,14 +104,14 @@ class INR(pl.LightningModule):
         self.aff_deform_params = nn.Parameter(torch.zeros((self.num_subjects, self.max_slices, 6),
                                                           dtype=torch.float32, device="cuda:0"))
         self.coord_deform_inrs = {subj_idx: MultiSliceMLP(self.coord_size, self.max_slices,
-                                                          num_hidden_layers=kwargs.get("deform_hidden_layers", 1))
+                                                          num_hidden_layers=kwargs.get("deform_num_hidden_layers", 1))
                                   for subj_idx in range(self.num_subjects)}
 
         self.recon_loss = torch.nn.MSELoss()
         self.weight_reg_inr = 1e-5
         self.weight_reg_aff = 1e-3
         self.weight_reg_deform = 0.0 #1e-3
-        self.weight_reg_latent = 1e-3
+        self.weight_reg_enc = 1e-4
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.model.parameters(),
@@ -130,12 +130,11 @@ class INR(pl.LightningModule):
             loss_reg_inr = loss_reg_inr * self.weight_reg_inr
             loss_reg += loss_reg_inr
             loss_dict["loss_reg_inr"] = loss_reg_inr
-        if self.weight_reg_latent:
-            loss_reg_latent = nn.functional.mse_loss(self.subject_latents[subj_idx],
-                                                     torch.zeros_like(self.subject_latents[subj_idx]))
-            loss_reg_latent = loss_reg_latent * self.weight_reg_latent
-            loss_reg += loss_reg_latent
-            loss_dict["loss_reg_latent"] = loss_reg_latent
+        if self.weight_reg_enc:
+            loss_reg_enc = sum((p * p).sum() for p in self.encoder.parameters())
+            loss_reg_enc = loss_reg_enc * self.weight_reg_enc
+            loss_reg += loss_reg_enc
+            loss_dict["loss_reg_enc"] = loss_reg_enc
         if self.weight_reg_aff:
             loss_reg_aff = nn.functional.mse_loss(self.aff_deform_params[subj_idx],
                                                   torch.zeros_like(self.aff_deform_params[subj_idx]))
@@ -151,11 +150,11 @@ class INR(pl.LightningModule):
         loss_dict["loss_reg"] = loss_reg
         return loss_reg, loss_dict
 
-    def forward(self, coords_voxel, aff_params, spacings, needs_flip,
+    def forward(self, coords_voxel, values, aff_params, spacings, needs_flip,
                 subject_idx, slice_idx, min_coords, max_coords):
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 subject_idx, slice_idx, min_coords, max_coords)
-        values_pred = self.forward_inr(world_coords, subject_idx)
+        values_pred = self.forward_inr(world_coords, values)
         return values_pred
 
     def forward_coord_model(self, coords_voxel, aff_params, spacings, needs_flip,
@@ -192,7 +191,7 @@ class INR(pl.LightningModule):
         norm_coords = norm_coords_.reshape(coords_voxel.shape)
         return norm_coords
 
-    def forward_inr(self, coords, values, subject_idx):
+    def forward_inr(self, coords, values):
         # Get a subject latent for each coordinate
         subject_latent = self.encoder(coords, values)
         subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
@@ -234,10 +233,10 @@ class INR(pl.LightningModule):
         # opt_deform.step()
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
 
-    # def validation_step(self, batch, batch_idx):
-    #
-    #
-    #     self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
+    def validation_step(self, batch, batch_idx):
+
+
+        self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
 
     @staticmethod
     def min_max_scale(X, x_min, x_max,  s_min=-1, s_max=1):
@@ -248,13 +247,15 @@ class INR(pl.LightningModule):
 class Params:
     check_val_every_n_epoch: int = 10
     num_hidden_layers: int = 4
+    enc_num_hidden_layers: int = 4
+    deform_num_hidden_layers: int = 4
     hidden_size: int = 64
     max_epochs: int = 1000
     siren_factor: float = 50.0
 
 
 def main(work_dir, wandb_disabled="true"):
-    os.environ['WANDB_DISABLED'] = wandb_disabled
+    # os.environ['WANDB_DISABLED'] = wandb_disabled
     logger = WandbLogger(save_dir=work_dir, project="CMR-Align")
 
     # configure accelerator and devices

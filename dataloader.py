@@ -270,7 +270,7 @@ class CardiacUKBB(Dataset):
         indices = non_padding_indices[indices_sample]
 
         # Get image values at the indices samples
-        image_values_sample = img[tuple(indices.T[:-1])].unsqueeze(-1)  # (num_coords, 1)
+        image_values_sample = img[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
