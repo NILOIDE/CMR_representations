@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Union
 import numpy as np
 import nibabel as nib
 import torch
@@ -203,6 +203,7 @@ class CardiacUKBB(Dataset):
     LUT_NAME = "cardiac_mri"
 
     def __init__(self, subject_data_paths, num_coords=4000, **kwargs):
+        super().__init__()
         assert subject_data_paths
         self.data_paths = subject_data_paths
         self.num_coords = num_coords
@@ -229,13 +230,10 @@ class CardiacUKBB(Dataset):
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
             non_padding_indices = make_masked_coordinate_tensor(image_mask)
-            # Sample num_coords amount of indices that our batch will consist of
-            indices_sample = torch.randint(0, non_padding_indices.shape[0], (self.num_coords,))
-            indices = non_padding_indices[indices_sample]
             # Add the time index to get the full volume index
-            full_indices = torch.cat((indices, torch.full((indices.shape[0], 1), selected_frame)), dim=1)
-            # Get image values at the indices samples
-            image_values_sample = image[tuple(indices.T)]
+            # full indices (slice, x, y, t)
+            full_indices = torch.cat((non_padding_indices, torch.full((non_padding_indices.shape[0], 1), selected_frame)), dim=1)
+
             # Load in the max/min coord values of volume (used for coord normalization)
             coord_max = torch.tensor(f['coord_max'][:], dtype=torch.float32)
             coord_min = torch.tensor(f['coord_min'][:], dtype=torch.float32)
@@ -243,22 +241,51 @@ class CardiacUKBB(Dataset):
             aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32)
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
-        return image_values_sample, full_indices, coord_max, coord_min, \
+        return image, full_indices, coord_max, coord_min, \
             aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
+        return self.generate_item(idx)
+
+    def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        img_values, indices, min_coords, max_coords, \
-            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx)
+        img, non_padding_indices, min_coords, max_coords, \
+            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
+
+        if num_coords is None:
+            num_coords = self.num_coords
+        elif isinstance(num_coords, float):
+            num_coords = num_coords * torch.prod(img.shape)
+        else:
+            pass  # num_coord is already an int
+        # Sample num_coords amount of indices that our batch will consist of
+        indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
+        # indices (slice, x, y)
+        indices = non_padding_indices[indices_sample]
+
+        # Get image values at the indices samples
+        image_values_sample = img[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         sub_idx = torch.tensor(idx, dtype=torch.long)
-        return voxel_indices, img_values, aff_params_padded, spacings_padded, needs_flip_padded, \
+        return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
             sub_idx, slice_indices, min_coords, max_coords
 
+
+
+class CardiacUKBBValidation(CardiacUKBB):
+    LUT_NAME = "cardiac_mri_val"
+
+    def __init__(self, subject_data_paths, num_coords=4000, **kwargs):
+        super().__init__(subject_data_paths, num_coords=4000)
+
+    def __getitem__(self, idx: int):
+        # Load image and seg data
+        img_values, indices, min_coords, max_coords, \
+            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx)
 
 if __name__ == '__main__':
     a = CMRDataModule()

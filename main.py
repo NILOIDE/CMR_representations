@@ -12,35 +12,10 @@ from torch import nn
 
 
 from dataloader import CMRDataModule
+from encoders import PerceiverEncoder
+from layers import Sine
 from utils import params_to_mat
 from lightning.pytorch.loggers import WandbLogger
-
-
-class Sine(nn.Module):
-    """ See SIREN paper and github. """
-    LUT_NAME = "sine"
-
-    def __init__(self, in_size, out_size, siren_factor=50., dropout=0.0, **kwargs):
-        super(Sine, self).__init__()
-        self.linear = nn.Linear(in_size, out_size)
-        # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
-        self.siren_factor = siren_factor
-        self.weight_init()
-        self.dropout = None if dropout == 0.0 else nn.Dropout(dropout)
-
-    def forward(self, x):
-        x = self.linear(x)
-        x = torch.sin(self.siren_factor * x)
-        if self.dropout is not None:
-            x = self.dropout(x)
-        return x
-
-    def weight_init(self):
-        with torch.no_grad():
-            num_input = self.linear.weight.size(-1)
-            # See supplement Sec. 1.5 for discussion of factor 30
-            self.linear.weight.uniform_(-math.sqrt(6 / num_input) / self.siren_factor,
-                                        math.sqrt(6 / num_input) / self.siren_factor)
 
 
 class ReconstructionHead(nn.Module):
@@ -117,15 +92,15 @@ class INR(pl.LightningModule):
         self.automatic_optimization = False
 
         self.coord_size = coord_size
+        self.internsity_size = 1
         self.num_subjects = num_subjects
         self.max_slices = max_slices
 
-        self.latent_init_std = kwargs.get("h_init_std", 1e-2)
-        self.latent_size = kwargs.get("h_init_std", 128)
-        self.subject_latents = nn.Parameter(torch.normal(0., self.latent_init_std, (self.num_subjects, self.latent_size,)), requires_grad=True)
+        self.latent_size = kwargs.get("latent_size", 128)
 
-        self.model = MLPBackbone(self.coord_size + self.latent_size, **kwargs)
-        self.recon_layer = ReconstructionHead(self.model.out_size, 1)
+        self.encoder = PerceiverEncoder(self.coord_size, self.internsity_size, kwargs['hidden_size'], **kwargs)
+        self.model = MLPBackbone(self.coord_size + self.encoder.out_size, **kwargs)
+        self.recon_layer = ReconstructionHead(self.model.out_size, self.internsity_size)
         self.aff_deform_params = nn.Parameter(torch.zeros((self.num_subjects, self.max_slices, 6),
                                                           dtype=torch.float32, device="cuda:0"))
         self.coord_deform_inrs = {subj_idx: MultiSliceMLP(self.coord_size, 1, kwargs['hidden_size'], self.max_slices)
@@ -138,7 +113,7 @@ class INR(pl.LightningModule):
         self.weight_reg_latent = 1e-3
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.Adam([*self.model.parameters(), *self.recon_layer.parameters()], lr=1e-3)
+        opt_inr = torch.optim.Adam([*self.model.parameters(), *self.recon_layer.parameters(), self.subject_latents], lr=1e-3)
         opt_aff = torch.optim.Adam([self.aff_deform_params], lr=1e-3)
         # opt_deform = torch.optim.Adam([w for inr in self.coord_deform_inrs.values() for w in inr.weights] +
         #                               [b for inr in self.coord_deform_inrs.values() for b in inr.biases], lr=1e-3)
@@ -215,9 +190,9 @@ class INR(pl.LightningModule):
         norm_coords = norm_coords_.reshape(coords_voxel.shape)
         return norm_coords
 
-    def forward_inr(self, coords, subject_idx):
+    def forward_inr(self, coords, values, subject_idx):
         # Get a subject latent for each coordinate
-        subject_latent = self.subject_latents[subject_idx]
+        subject_latent = self.encoder(coords, values)
         subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
         x = torch.cat((coords, subject_latent), dim=-1)
         # Forward INR to obtain predicted volume values
@@ -241,7 +216,7 @@ class INR(pl.LightningModule):
 
         coords_world = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 subject_idx, slice_idx, min_coords, max_coords)
-        values_pred = self.forward_inr(coords_world, subject_idx)
+        values_pred = self.forward_inr(coords_world, values, subject_idx)
         values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
         loss_recon = self.recon_loss(values_pred, values_deform)
 
@@ -256,6 +231,11 @@ class INR(pl.LightningModule):
         opt_aff.step()
         # opt_deform.step()
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
+
+    def validation_step(self, batch, batch_idx):
+
+
+        self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
 
     @staticmethod
     def min_max_scale(X, x_min, x_max,  s_min=-1, s_max=1):
