@@ -66,7 +66,7 @@ class MLPBackbone(nn.Module):
 
 
 class MultiSliceMLP(nn.Module):
-    def __init__(self, coord_size: int, num_hidden_layers: int, hidden_size: int, nm_slices: int, siren_factor=50., **kwargs):
+    def __init__(self, coord_size: int, num_slices: int, num_hidden_layers: int = 1, hidden_size: int = 128, siren_factor=50.):
         super(MultiSliceMLP, self).__init__()
         self.siren_factor = siren_factor
 
@@ -76,8 +76,8 @@ class MultiSliceMLP(nn.Module):
         self.biases = []
         for i, o in zip(in_sizes, out_sizes):
             w_range = math.sqrt(6 / i) / self.siren_factor
-            self.weights.append(nn.Parameter((w_range + w_range) * torch.rand(size=(nm_slices, i, o), device="cpu") - w_range, requires_grad=True))
-            self.biases.append(nn.Parameter((w_range + w_range) * torch.rand(size=(nm_slices, i, o), device="cpu") - w_range, requires_grad=True))
+            self.weights.append(nn.Parameter((w_range + w_range) * torch.rand(size=(num_slices, i, o), device="cpu") - w_range, requires_grad=True))
+            self.biases.append(nn.Parameter((w_range + w_range) * torch.rand(size=(num_slices, i, o), device="cpu") - w_range, requires_grad=True))
 
     def forward(self, coords, slice_indices):
         x = coords[:, None]
@@ -98,12 +98,13 @@ class INR(pl.LightningModule):
 
         self.latent_size = kwargs.get("latent_size", 128)
 
-        self.encoder = PerceiverEncoder(self.coord_size, self.internsity_size, kwargs['hidden_size'], **kwargs)
+        self.encoder = PerceiverEncoder(self.coord_size, self.internsity_size, **kwargs)
         self.model = MLPBackbone(self.coord_size + self.encoder.out_size, **kwargs)
         self.recon_layer = ReconstructionHead(self.model.out_size, self.internsity_size)
         self.aff_deform_params = nn.Parameter(torch.zeros((self.num_subjects, self.max_slices, 6),
                                                           dtype=torch.float32, device="cuda:0"))
-        self.coord_deform_inrs = {subj_idx: MultiSliceMLP(self.coord_size, 1, kwargs['hidden_size'], self.max_slices)
+        self.coord_deform_inrs = {subj_idx: MultiSliceMLP(self.coord_size, self.max_slices,
+                                                          num_hidden_layers=kwargs.get("deform_hidden_layers", 1))
                                   for subj_idx in range(self.num_subjects)}
 
         self.recon_loss = torch.nn.MSELoss()
@@ -113,7 +114,8 @@ class INR(pl.LightningModule):
         self.weight_reg_latent = 1e-3
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.Adam([*self.model.parameters(), *self.recon_layer.parameters(), self.subject_latents], lr=1e-3)
+        opt_inr = torch.optim.Adam([*self.model.parameters(),
+                                    *self.recon_layer.parameters(), *self.encoder.parameters()], lr=1e-3)
         opt_aff = torch.optim.Adam([self.aff_deform_params], lr=1e-3)
         # opt_deform = torch.optim.Adam([w for inr in self.coord_deform_inrs.values() for w in inr.weights] +
         #                               [b for inr in self.coord_deform_inrs.values() for b in inr.biases], lr=1e-3)
@@ -232,10 +234,10 @@ class INR(pl.LightningModule):
         # opt_deform.step()
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
 
-    def validation_step(self, batch, batch_idx):
-
-
-        self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
+    # def validation_step(self, batch, batch_idx):
+    #
+    #
+    #     self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
 
     @staticmethod
     def min_max_scale(X, x_min, x_max,  s_min=-1, s_max=1):
@@ -252,7 +254,7 @@ class Params:
 
 
 def main(work_dir, wandb_disabled="true"):
-    # os.environ['WANDB_DISABLED'] = wandb_disabled
+    os.environ['WANDB_DISABLED'] = wandb_disabled
     logger = WandbLogger(save_dir=work_dir, project="CMR-Align")
 
     # configure accelerator and devices
@@ -261,7 +263,7 @@ def main(work_dir, wandb_disabled="true"):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     data_module = CMRDataModule(load_la_dir=r"D:\UKBB_subjects", load_sa_dir=r"D:\UKBB_subjects_unaligned",
-                                batch_size=4, num_coords=4000, num_workers=4)
+                                batch_size=4, num_coords=4000, num_workers=0)
     data_module.setup(stage="fit")
 
     coord_size = data_module.get_coord_size()

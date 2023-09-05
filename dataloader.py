@@ -56,9 +56,15 @@ class CMRDataModule(pl.LightningDataModule):
         self.test_dset = CardiacUKBB([subject_data[i] for i in test_idxs],
                                      num_coords=self.num_coords)
 
-        self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
-        self._val_dataloader = DataLoader(self.val_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
-        self._test_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
+        self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True,
+                                            num_workers=self.num_workers, pin_memory=True,
+                                            persistent_workers=self.num_workers > 0)
+        self._val_dataloader = DataLoader(self.val_dset, batch_size=self.batch_size,
+                                          num_workers=self.num_workers, pin_memory=True,
+                                          persistent_workers=self.num_workers > 0)
+        self._test_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size,
+                                           num_workers=self.num_workers, pin_memory=True,
+                                           persistent_workers=self.num_workers > 0)
 
     def get_coord_size(self) -> int:
         return self.train_dset.coord_size
@@ -264,7 +270,7 @@ class CardiacUKBB(Dataset):
         indices = non_padding_indices[indices_sample]
 
         # Get image values at the indices samples
-        image_values_sample = img[tuple(indices.T[:-1])]
+        image_values_sample = img[tuple(indices.T[:-1])].unsqueeze(-1)  # (num_coords, 1)
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
@@ -273,7 +279,6 @@ class CardiacUKBB(Dataset):
         sub_idx = torch.tensor(idx, dtype=torch.long)
         return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
             sub_idx, slice_indices, min_coords, max_coords
-
 
 
 class CardiacUKBBValidation(CardiacUKBB):

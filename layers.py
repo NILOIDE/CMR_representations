@@ -42,9 +42,9 @@ class Sine(Layer):
     def __init__(self, in_size, out_size, siren_factor=30., **kwargs):
         super(Sine, self).__init__(in_size, out_size, **kwargs)
         self.linear = nn.Linear(in_size, out_size)
-        self.weight_init()
         # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
         self.siren_factor = siren_factor
+        self.weight_init()
 
     def forward(self, x):
         x = self.linear(x)
@@ -111,8 +111,7 @@ class MultiHeadAttention(nn.Module):
 
         attn_output = self.scaled_dot_product_attention(Q, K, V, attn_mask)
         output = self.combine_heads(attn_output)
-        if self.map_v:
-            output = self.W_o(output)
+        output = self.W_o(output)
         return output
 
 
