@@ -220,7 +220,7 @@ class CardiacUKBB(Dataset):
         return len(self.data_paths)
 
     def load_subject_data(self, subj_idx: int, frame_idx: Optional[int] = None, **kwargs) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Load image and segmentation files and undersample them according to hold-out rates.
         :param subj_idx: Index of subject in dataset list.
         """
@@ -247,7 +247,7 @@ class CardiacUKBB(Dataset):
             aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32)
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
-        return image, full_indices, coord_max, coord_min, \
+        return image, image_mask, full_indices, coord_max, coord_min, \
             aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
@@ -255,30 +255,30 @@ class CardiacUKBB(Dataset):
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        img, non_padding_indices, min_coords, max_coords, \
+        img, padding_mask, non_padding_indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
 
         if num_coords is None:
             num_coords = self.num_coords
         elif isinstance(num_coords, float):
-            num_coords = num_coords * torch.prod(img.shape)
+            num_coords = int((num_coords * torch.prod(torch.tensor(img.shape))).item())
         else:
             pass  # num_coord is already an int
         # Sample num_coords amount of indices that our batch will consist of
         indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
-        # indices (slice, x, y)
+        # indices (slice, x, y). non_padding_indices contains all the indices of the slice volume that are not padding
         indices = non_padding_indices[indices_sample]
 
-        # Get image values at the indices samples
+        # Get image values at the indices samples. To ignore time index we use [:-1]
         image_values_sample = img[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
-        voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
+        voxel_indices = torch.cat((indices[:, 1:3], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
-        sub_idx = torch.tensor(idx, dtype=torch.long)
+        subj_idx = torch.tensor(idx, dtype=torch.long)
         return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
-            sub_idx, slice_indices, min_coords, max_coords
+            subj_idx, slice_indices, min_coords, max_coords
 
 
 class CardiacUKBBValidation(CardiacUKBB):
@@ -289,8 +289,9 @@ class CardiacUKBBValidation(CardiacUKBB):
 
     def __getitem__(self, idx: int):
         # Load image and seg data
-        img_values, indices, min_coords, max_coords, \
-            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx)
+        img_values, padding_mask, indices, min_coords, max_coords, \
+            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame_idx=0)
+        return self.load_subject_data(idx, frame_idx=0)
 
 if __name__ == '__main__':
     a = CMRDataModule()

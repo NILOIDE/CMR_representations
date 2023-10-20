@@ -117,7 +117,7 @@ class MultiHeadAttention(nn.Module):
 
 class AttentionLayer(nn.Module):
     def __init__(self, d_q: int, d_k: int, d_v: int, d_model: int, d_out: int, nhead: int = 1, dim_feedforward: int = 128,
-                 activation_class: Layer = Sine,
+                 activation_class: Layer = Relu,
                  layer_norm_eps: float = 1e-5, **kwargs) -> None:
         factory_kwargs = {'device': kwargs.get("device", None), 'dtype': kwargs.get("dtype", None)}
         super(AttentionLayer, self).__init__()

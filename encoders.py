@@ -11,7 +11,7 @@ class PerceiverEncoder(nn.Module):
     LUT_NAME = "perceiver"
 
     def __init__(self, coord_size: int, in_features: int, hidden_size: int = 128, enc_num_hidden_layers: int = 2,
-                 latent_nodes: int = 128, latent_size: int = 128, **kwargs):
+                 latent_nodes: int = 64, latent_size: int = 128, **kwargs):
         super(PerceiverEncoder, self).__init__()
         self.att_heads = kwargs.get("enc_att_num_heads", 1)
 
@@ -50,5 +50,8 @@ class PerceiverEncoder(nn.Module):
             x = x + ca_layer(x, cat_input, cat_input)
             x = x + sa_layer(x, x, x)
             outs.append(x)
-        mean_latent = outs[-1].mean(1)
+        mean_latent = outs[-1]
         return mean_latent
+
+
+

@@ -12,57 +12,11 @@ from torch import nn
 
 
 from dataloader import CMRDataModule
+from decoders import MLPBackbone, ReconstructionHead, CADecoder
 from encoders import PerceiverEncoder
-from layers import Sine
+from layers import Sine, Relu
 from utils import params_to_mat
 from lightning.pytorch.loggers import WandbLogger
-
-
-class ReconstructionHead(nn.Module):
-    def __init__(self, input_size, output_size, **kwargs):
-        super(ReconstructionHead, self).__init__()
-        self.out_layer = nn.Linear(input_size, output_size)
-        self.out_size = output_size
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.out_layer(x)
-        out = torch.sigmoid(out)
-        return out
-
-
-class MLP(nn.Module):
-    """ Simple decoder that uses a single averaged latent vector in its input to
-    condition the way coordinates are processed. """
-    LUT_NAME = "mlp"
-
-    def __init__(self, coord_size: int, num_hidden_layers: int, hidden_size: int, out_size: int, **kwargs):
-        super(MLP, self).__init__()
-        a = [Sine(coord_size, hidden_size)]
-        for i in range(num_hidden_layers - 2):
-            a.append(Sine(hidden_size, hidden_size))
-        a.append(nn.Linear(hidden_size, out_size))
-        self.mlp = nn.Sequential(*a)
-        self.out_size = out_size
-
-    def forward(self, coord: torch.Tensor) -> torch.Tensor:
-        return self.mlp(coord)
-
-
-class MLPBackbone(nn.Module):
-    """ Simple decoder that uses a single averaged latent vector in its input to
-    condition the way coordinates are processed. """
-    LUT_NAME = "mlp"
-
-    def __init__(self, coord_size: int, num_hidden_layers: int = 4, hidden_size: int = 128, **kwargs):
-        super(MLPBackbone, self).__init__()
-        a = [Sine(coord_size, hidden_size, kwargs["siren_factor"])]
-        for i in range(num_hidden_layers - 1):
-            a.append(Sine(hidden_size, hidden_size, kwargs["siren_factor"]))
-        self.mlp = nn.Sequential(*a)
-        self.out_size = hidden_size
-
-    def forward(self, coord: torch.Tensor) -> torch.Tensor:
-        return self.mlp(coord)
 
 
 class MultiSliceMLP(nn.Module):
@@ -99,7 +53,7 @@ class INR(pl.LightningModule):
         self.latent_size = kwargs.get("latent_size", 128)
 
         self.encoder = PerceiverEncoder(self.coord_size, self.internsity_size, **kwargs)
-        self.model = MLPBackbone(self.coord_size + self.encoder.out_size, **kwargs)
+        self.model = CADecoder(self.coord_size, self.encoder.out_size, **kwargs)
         self.recon_layer = ReconstructionHead(self.model.out_size, self.internsity_size)
         self.aff_deform_params = nn.Parameter(torch.zeros((self.num_subjects, self.max_slices, 6),
                                                           dtype=torch.float32, device="cuda:0"))
@@ -108,14 +62,15 @@ class INR(pl.LightningModule):
                                   for subj_idx in range(self.num_subjects)}
 
         self.recon_loss = torch.nn.MSELoss()
-        self.weight_reg_inr = 1e-5
-        self.weight_reg_aff = 1e-3
+        self.weight_reg_inr = 0  #e-5
+        self.weight_reg_aff = 0  #e-3
         self.weight_reg_deform = 0.0 #1e-3
-        self.weight_reg_enc = 1e-4
+        self.weight_reg_enc = 0  # 1e-4
+        self.inference_opt_steps = 100
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.model.parameters(),
-                                    *self.recon_layer.parameters(), *self.encoder.parameters()], lr=1e-3)
+                                    *self.recon_layer.parameters(), *self.encoder.parameters()], lr=1e-4)
         opt_aff = torch.optim.Adam([self.aff_deform_params], lr=1e-3)
         # opt_deform = torch.optim.Adam([w for inr in self.coord_deform_inrs.values() for w in inr.weights] +
         #                               [b for inr in self.coord_deform_inrs.values() for b in inr.biases], lr=1e-3)
@@ -151,19 +106,25 @@ class INR(pl.LightningModule):
         return loss_reg, loss_dict
 
     def forward(self, coords_voxel, values, aff_params, spacings, needs_flip,
-                subject_idx, slice_idx, min_coords, max_coords):
-        world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
-                                                subject_idx, slice_idx, min_coords, max_coords)
+                subject_idx, slice_idx, min_coords, max_coords, aff_params_deform=None):
+        if aff_params_deform is None:
+            aff_params_deform = self.aff_deform_params[subject_idx]
+        world_coords = self.forward_coord_model(coords_voxel, aff_params, aff_params_deform, spacings, needs_flip,
+                                                slice_idx, min_coords, max_coords)
         values_pred = self.forward_inr(world_coords, values)
         return values_pred
 
-    def forward_coord_model(self, coords_voxel, aff_params, spacings, needs_flip,
-                subject_idx, slice_idx, min_coords, max_coords):
+    def forward_coord_model(self, coords_voxel, aff_params, aff_params_deform, spacings, needs_flip,
+                            slice_idx, min_coords, max_coords):
+        # TODO: Change to einsum instead of flattening
+        # If we want to account for non-rigid deformations, we want to uncomment this
         # coord_deform_inr = self.coord_deform_inrs[subject_idx]
         # coord_deform_inr = coord_deform_inr.cuda()
-
         # coords_voxel = coords_voxel + coord_deform_inr(coords_voxel, slice_idx)
-        aff_params_deform = aff_params + self.aff_deform_params[subject_idx]
+
+        # Create affine matrices for each slice from affine params
+        # TODO: change from affine params to affine matrix multiplication
+        aff_params_deform = aff_params + aff_params_deform
         aff_params_deform_ = aff_params_deform.reshape((-1, aff_params_deform.shape[-1]))
         spacings_ = spacings.reshape((-1, spacings.shape[-1]))
         needs_flip_ = needs_flip.reshape((-1,))
@@ -175,7 +136,7 @@ class INR(pl.LightningModule):
         time_coord_ = coords_flat_[:, -1:]  # We take out time coordinates. We will replace them back in later.
         spatial_coord_ = torch.cat((coords_flat_[:, :-1], torch.ones_like(time_coord_)), dim=1)  # Moving coords to world space requires (x, y, z, 1)
 
-        # Create indixing tensor to keep track of which batch is each coordinate coming from
+        # Create indexing tensor to keep track of which batch is each coordinate coming from
         b, _ = torch.meshgrid(torch.arange(0, slice_idx.shape[0]), torch.arange(0, slice_idx.shape[1]))
         # Get affines corresponding to each coordinate
         affines_ = affines[b.reshape(-1), slice_idx.reshape(-1)]
@@ -185,7 +146,7 @@ class INR(pl.LightningModule):
         # Add time coordinate back
         coords_world_[:, -1:] = time_coord_
 
-        # normalize coordinates [-1, 1]
+        # normalize world coordinates to [-1, 1]
         norm_coords_ = self.min_max_scale(coords_world_, min_coords[b.reshape(-1)], max_coords[b.reshape(-1)],
                                           s_min=-1, s_max=1)
         norm_coords = norm_coords_.reshape(coords_voxel.shape)
@@ -194,11 +155,10 @@ class INR(pl.LightningModule):
     def forward_inr(self, coords, values):
         # Get a subject latent for each coordinate
         subject_latent = self.encoder(coords, values)
-        subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
-        x = torch.cat((coords, subject_latent), dim=-1)
+        # subject_latent = torch.zeros_like(subject_latent) # TODO:
         # Forward INR to obtain predicted volume values
-        x_ = x.reshape((-1, x.shape[-1]))
-        features_ = self.model(x_)
+        features = self.model(coords, subject_latent)
+        features_ = features.reshape((-1, features.shape[-1]))
         values_pred_ = self.recon_layer(features_)
         values_pred = values_pred_.reshape((coords.shape[0], coords.shape[1]))
         return values_pred
@@ -215,9 +175,10 @@ class INR(pl.LightningModule):
 
         coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
 
-        coords_world = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
-                                                subject_idx, slice_idx, min_coords, max_coords)
-        values_pred = self.forward_inr(coords_world, values, subject_idx)
+        aff_params_deform = self.aff_deform_params[subject_idx]
+        coords_world = self.forward_coord_model(coords_voxel, aff_params, aff_params_deform, spacings, needs_flip,
+                                                slice_idx, min_coords, max_coords)
+        values_pred = self.forward_inr(coords_world, values)
         values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
         loss_recon = self.recon_loss(values_pred, values_deform)
 
@@ -233,10 +194,84 @@ class INR(pl.LightningModule):
         # opt_deform.step()
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
 
+    @torch.enable_grad()
     def validation_step(self, batch, batch_idx):
+        # We will only be optimizing the affine params. We ignore the INR and encoder optimizer.
+        # self.train()
+        # _, opt_aff = self.optimizers()
+        # aff_params_deform = nn.Parameter(torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda:0"))
+        # start_loss = self.validation_loss(batch_idx, aff_params_deform)
+        # self.log("validation/start_loss", start_loss)
+        # start_recon = self.val_image(batch_idx, aff_params_deform)
+        # self.logger.log_image("validation/start_recon", start_recon)
+        #
+        # for i in range(self.inference_opt_steps):
+        #     batch = self.trainer.datamodule.val_dset.generate_item(batch_idx, 1.0)
+        #     coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+        #     coords_voxel = coords_voxel.cuda()[None]
+        #     values = values.cuda()[None]
+        #     aff_params = aff_params.cuda()[None]
+        #     spacings = spacings.cuda()[None]
+        #     needs_flip = needs_flip.cuda()[None]
+        #     subject_idx = subject_idx.cuda()[None]
+        #     slice_idx = slice_idx.cuda()[None]
+        #     min_coords = min_coords.cuda()[None]
+        #     max_coords = max_coords.cuda()[None]
+        #
+        #     values_pred = self.forward(coords_voxel, values, aff_params, spacings, needs_flip, None,
+        #                                 slice_idx, min_coords, max_coords, aff_params_deform=aff_params_deform)
+        #     values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
+        #     loss_recon = self.recon_loss(values_pred, values_deform)
+        #     opt_aff.zero_grad()
+        #     self.manual_backward(loss_recon)
+        #     opt_aff.step()
 
+        end_loss = self.validation_loss(batch_idx, self.aff_deform_params[batch_idx])
+        self.log("validation/end_loss", end_loss)
+        end_recon = self.val_image(batch_idx, self.aff_deform_params[batch_idx])
+        self.logger.log_image("validation/end_recon", end_recon)
 
-        self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
+    def validation_loss(self, batch_idx, aff_params_deform):
+        batch = self.trainer.datamodule.val_dset.generate_item(batch_idx, 1.0)
+        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+        coords_voxel = coords_voxel.cuda()[None]
+        values = values.cuda()[None]
+        aff_params = aff_params.cuda()[None]
+        spacings = spacings.cuda()[None]
+        needs_flip = needs_flip.cuda()[None]
+        subject_idx = subject_idx.cuda()[None]
+        slice_idx = slice_idx.cuda()[None]
+        min_coords = min_coords.cuda()[None]
+        max_coords = max_coords.cuda()[None]
+
+        values_pred = self.forward(coords_voxel, values, aff_params, spacings, needs_flip, None,
+                                   slice_idx, min_coords, max_coords, aff_params_deform=aff_params_deform)
+        values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
+        loss_recon = self.recon_loss(values_pred, values_deform)
+        return loss_recon
+
+    def val_image(self, batch_idx, aff_params_deform):
+        # Visualize slices
+        frame_idx = 0
+        batch = self.trainer.datamodule.val_dset.load_subject_data(batch_idx, frame_idx=frame_idx)
+        batch = [i.cuda() for i in batch]
+        img_values, padding_mask, indices, min_coords, max_coords, \
+            aff_params_padded, spacings_padded, needs_flip_padded = batch
+        slices = []
+        for i in range(img_values.shape[0]):
+            x, y = torch.where(padding_mask[i])
+            img = img_values[i, :x.max().item(), :y.max().item()]
+            indices = torch.meshgrid(torch.arange(0, img.shape[0]), torch.arange(0, img.shape[1]), torch.tensor([0]), torch.tensor([frame_idx]))
+            indices_ = torch.stack([i.reshape(-1) for i in indices], dim=1).cuda()
+            slice_pred_ = self.forward(indices_[None], img.reshape(-1)[None], aff_params_padded[None],
+                                       spacings_padded[None], needs_flip_padded[None], None,
+                                       torch.full((1, indices_.shape[0],), i), min_coords[None], max_coords[None],
+                                       aff_params_deform=aff_params_deform)
+            slice_pred = slice_pred_.reshape(img.shape)
+            diff = (img-slice_pred).abs()
+            vis = torch.cat((img, slice_pred, diff), dim=1)
+            slices.append(vis)
+        return slices
 
     @staticmethod
     def min_max_scale(X, x_min, x_max,  s_min=-1, s_max=1):
@@ -245,13 +280,13 @@ class INR(pl.LightningModule):
 
 @dataclass
 class Params:
-    check_val_every_n_epoch: int = 10
+    check_val_every_n_epoch: int = 50
     num_hidden_layers: int = 4
     enc_num_hidden_layers: int = 4
     deform_num_hidden_layers: int = 4
-    hidden_size: int = 64
-    max_epochs: int = 1000
-    siren_factor: float = 50.0
+    hidden_size: int = 128
+    max_epochs: int = 100_000
+    siren_factor: float = 30.0
 
 
 def main(work_dir, wandb_disabled="true"):
@@ -288,6 +323,7 @@ def main(work_dir, wandb_disabled="true"):
         limit_train_batches=1.0,
         limit_val_batches=1.0,
         num_sanity_val_steps=1,
+        log_every_n_steps=5,
     )
 
     trainer.fit(model, datamodule=data_module)
