@@ -1,7 +1,9 @@
+from typing import List
+
 from torch import nn
 import torch
 
-from layers import Sine, Relu, AttentionLayer
+from layers import Sine, Relu, AttentionLayer, CrossAttentionLayer
 
 
 class ReconstructionHead(nn.Module):
@@ -42,14 +44,16 @@ class MLPBackbone(nn.Module):
 
     def __init__(self, coord_size: int, latent_size: int, num_hidden_layers: int = 4, hidden_size: int = 128, **kwargs):
         super(MLPBackbone, self).__init__()
-        a = [Sine(coord_size, hidden_size, siren_factor=kwargs["siren_factor"])]
+        a = [Sine(coord_size+latent_size, hidden_size, siren_factor=kwargs["siren_factor"])]
         for i in range(num_hidden_layers - 1):
             a.append(Sine(hidden_size, hidden_size, siren_factor=kwargs["siren_factor"]))
         self.mlp = nn.Sequential(*a)
         self.out_size = hidden_size
 
     def forward(self, coord: torch.Tensor, latents: torch.Tensor) -> torch.Tensor:
-        x = torch.cat((coord, latents.mean(1)), dim=1)
+        h = latents[-1].mean(1)
+        h = torch.tile(h, (1, coord.shape[1], 1))
+        x = torch.cat((coord, h), dim=-1)
         return self.mlp(x)
 
 
@@ -60,20 +64,22 @@ class CADecoder(nn.Module):
 
     def __init__(self, coord_size: int, latent_size: int, num_hidden_layers: int = 4, hidden_size: int = 128, **kwargs):
         super(CADecoder, self).__init__()
+        self.att_heads = kwargs.get("dec_att_num_heads", 1)
         a = [AttentionLayer(coord_size if i == 0 else hidden_size,
                             latent_size,
                             latent_size,
-                            8,
                             hidden_size,
+                            hidden_size,
+                            self.att_heads,
                             activation_class=Relu,
                             )
              for i in range(num_hidden_layers)]
         self.mlp = nn.ModuleList(a)
         self.out_size = hidden_size
 
-    def forward(self, coord: torch.Tensor, latents: torch.Tensor) -> torch.Tensor:
+    def forward(self, coord: torch.Tensor, latents: List[torch.Tensor]) -> torch.Tensor:
         out = coord
-        for layer in self.mlp:
-            out = layer(out, latents, latents)
+        for layer, h in zip(self.mlp, latents):
+            out = layer(out, h)
         return out
 

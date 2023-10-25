@@ -270,11 +270,11 @@ class CardiacUKBB(Dataset):
         indices = non_padding_indices[indices_sample]
 
         # Get image values at the indices samples. To ignore time index we use [:-1]
-        image_values_sample = img[tuple(indices.T[:-1])]
+        image_values_sample = img[tuple(indices.T[:-1])][..., None]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = torch.cat((indices[:, 1:3], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=1)
-        slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
+        slice_indices = indices[:, 0]  # Get which slice does each point belong to. Shape: (N, 1)
 
         subj_idx = torch.tensor(idx, dtype=torch.long)
         return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
@@ -292,6 +292,7 @@ class CardiacUKBBValidation(CardiacUKBB):
         img_values, padding_mask, indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame_idx=0)
         return self.load_subject_data(idx, frame_idx=0)
+
 
 if __name__ == '__main__':
     a = CMRDataModule()
