@@ -109,7 +109,7 @@ class CMRDataModule(pl.LightningDataModule):
 
             slices = la_files + sa_files
             images.append(slices)
-            segs.append(seg_sa_files)
+            segs.append(["" for i in la_files] + seg_sa_files)
             if len(slices) > max_slices:
                 max_slices = len(slices)
             count += 1
@@ -124,7 +124,7 @@ class CMRDataModule(pl.LightningDataModule):
                                 store_path=r"D:\UKBB_subjects_unaligned", replace_existing=True):
         store_path = Path(store_path)
         prepr_data_paths = []
-        for subj_slices in tqdm(subj_paths, desc="Preprocessing subject data into torch tensor."):
+        for subj_slices, subj_segs in tqdm(list(zip(subj_paths, seg_paths)), desc="Preprocessing subject data into torch tensor."):
             coord_max = []
             coord_min = []
             images = []
@@ -132,11 +132,18 @@ class CMRDataModule(pl.LightningDataModule):
             aff_params = []
             spacings = []
             flippings = []
-            for idx, slice_path in enumerate(subj_slices):
+            for idx, (slice_path, seg_path) in enumerate(zip(subj_slices, subj_segs)):
                 nib_subj = nib.load(slice_path)
                 img = nib_subj.get_fdata()
                 img = torch.from_numpy(normalize_image_with_percentile(img)).to(torch.float32)
                 images.append(img)
+                if seg_path == "":
+                    seg = torch.zeros(img.shape, dtype=torch.uint8)  # TODO: This will cause LAX slices to have background labels inside the heart
+                else:
+                    nib_seg = nib.load(seg_path)
+                    seg = nib_seg.get_fdata()
+                    seg = torch.from_numpy(seg).to(torch.uint8)
+                segs.append(seg)
                 # Find min and max coordinates of slice
                 aff = nib_subj.affine
                 (x, y) = img.shape[:2]
@@ -160,9 +167,11 @@ class CMRDataModule(pl.LightningDataModule):
             # Place all subject slices into one combined volume (slices, height_max, width_max)
             dim_max = torch.amax(torch.tensor([i.shape[:2] for i in images]), dim=0)
             im_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]))
+            seg_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]))
             im_pad_mask = torch.zeros_like(im_pad, dtype=torch.bool)
-            for i, im in enumerate(images):
+            for i, (im, seg) in enumerate(zip(images, segs)):
                 im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze(2)
+                seg_pad[i, :im.shape[0], :im.shape[1]] = seg.squeeze(2)
                 im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
             non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
 
@@ -195,6 +204,7 @@ class CMRDataModule(pl.LightningDataModule):
                 with h5py.File(save_path, 'w') as f:
                     f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
                     f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
+                    f.create_dataset('seg_padded', data=seg_pad.moveaxis(-1, 0).numpy(), compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
                     f.create_dataset('coord_max', data=subj_coord_max.numpy(), compression=1)
                     f.create_dataset('coord_min', data=subj_coord_min.numpy(), compression=1)
                     f.create_dataset('aff_params_padded', data=aff_params_padded.numpy(), compression=1)
@@ -220,7 +230,8 @@ class CardiacUKBB(Dataset):
         return len(self.data_paths)
 
     def load_subject_data(self, subj_idx: int, frame_idx: Optional[int] = None, **kwargs) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor,
+                     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Load image and segmentation files and undersample them according to hold-out rates.
         :param subj_idx: Index of subject in dataset list.
         """
@@ -232,6 +243,7 @@ class CardiacUKBB(Dataset):
         with h5py.File(self.data_paths[subj_idx], 'r') as f:
             # Load only the randomly selected image frame from the (time, slices, H, W) volume
             image = torch.tensor(f['image_padded'][selected_frame], dtype=torch.float32)
+            seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.float32)
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
@@ -248,7 +260,7 @@ class CardiacUKBB(Dataset):
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
         return image, image_mask, full_indices, coord_max, coord_min, \
-            aff_params_padded, spacings_padded, flippings_padded
+            aff_params_padded, spacings_padded, flippings_padded, seg
 
     def __getitem__(self, idx: int):
         return self.generate_item(idx)
@@ -256,7 +268,7 @@ class CardiacUKBB(Dataset):
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
         img, padding_mask, non_padding_indices, min_coords, max_coords, \
-            aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
+            aff_params_padded, spacings_padded, needs_flip_padded, seg = self.load_subject_data(idx, frame)
 
         if num_coords is None:
             num_coords = self.num_coords
@@ -265,12 +277,15 @@ class CardiacUKBB(Dataset):
         else:
             pass  # num_coord is already an int
         # Sample num_coords amount of indices that our batch will consist of
-        indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
+        # indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
+        perm = torch.randperm(non_padding_indices.shape[0])
+        indices_sample = perm[:num_coords]
         # indices (slice, x, y). non_padding_indices contains all the indices of the slice volume that are not padding
         indices = non_padding_indices[indices_sample]
 
         # Get image values at the indices samples. To ignore time index we use [:-1]
         image_values_sample = img[tuple(indices.T[:-1])][..., None]
+        seg_values_sample = seg[tuple(indices.T[:-1])][..., None]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = torch.cat((indices[:, 1:3], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=1)
@@ -278,7 +293,7 @@ class CardiacUKBB(Dataset):
 
         subj_idx = torch.tensor(idx, dtype=torch.long)
         return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
-            subj_idx, slice_indices, min_coords, max_coords
+            subj_idx, slice_indices, min_coords, max_coords, seg_values_sample
 
 
 class CardiacUKBBValidation(CardiacUKBB):

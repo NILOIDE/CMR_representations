@@ -1,13 +1,15 @@
 import math
 import os
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 import torch
 import lightning.pytorch as pl
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch import nn
+from tqdm import tqdm
+
 # import pytorch_lightning as pl
 
 
@@ -16,8 +18,9 @@ from decoders import MLPBackbone, ReconstructionHead, CADecoder
 from encoders import PerceiverEncoder
 from layers import Sine, Relu
 from pos_encoding import PosEncodingNeRFOptimized, PosEncodingGaussian
-from utils import params_to_mat
+from utils import params_to_mat, compute_neighbourhood_matrix
 from lightning.pytorch.loggers import WandbLogger
+import wandb
 
 
 class MultiSliceMLP(nn.Module):
@@ -193,7 +196,7 @@ class INR(pl.LightningModule):
     def training_step(self, batch):
         opt_inr, opt_enc, opt_aff = self.optimizers()
 
-        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords, _ = batch
 
         aff_params_deform = self.aff_deform_params[subject_idx]
         coords_world = self.forward_coord_model(coords_voxel, aff_params, aff_params_deform, spacings, needs_flip,
@@ -218,7 +221,7 @@ class INR(pl.LightningModule):
 
     # @torch.enable_grad()
     def validation_step(self, batch, batch_idx):
-        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords = batch
+        coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords, _ = batch
         # We will only be optimizing the affine params. We ignore the INR and encoder optimizer.
         # self.train()
         # _, opt_aff = self.optimizers()
@@ -251,8 +254,12 @@ class INR(pl.LightningModule):
 
         # end_loss = self.validation_loss(batch_idx, self.aff_deform_params[batch_idx])
         # self.log("validation/end_loss", end_loss)
-        end_recon = self.val_image(int(subject_idx[0]), aff_params_deform)
-        self.logger.log_image(f"validation/end_recon_{int(subject_idx[0])}", end_recon)
+
+        with torch.no_grad():
+            # Log point cloud
+            self.log_val_point_cloud(int(subject_idx[0]), draw_seg=True)
+            # Log individual 2D slices
+            self.log_val_slices(int(subject_idx[0]), aff_params_deform)
 
     # def validation_loss(self, batch_idx, aff_params_deform):
     #     batch = self.trainer.datamodule.val_dset.generate_item(batch_idx, 1.0)
@@ -273,13 +280,13 @@ class INR(pl.LightningModule):
     #     # loss_recon = self.recon_loss(values_pred, values_deform)
     #     return 0.0
 
-    def val_image(self, subject_idx, aff_params_deform):
+    def log_val_slices(self, subj_idx, aff_params_deform):
         # Visualize slices
         frame_idx = 0
-        batch = self.trainer.datamodule.val_dset.load_subject_data(subject_idx, frame_idx=frame_idx)
+        batch = self.trainer.datamodule.val_dset.load_subject_data(subj_idx, frame_idx=frame_idx)
         batch = [i.cuda() for i in batch]
         img_values, padding_mask, indices, min_coords, max_coords, \
-            aff_params_padded, spacings_padded, needs_flip_padded = batch
+            aff_params_padded, spacings_padded, needs_flip_padded, _ = batch
         slices = []
         for i in range(0, img_values.shape[0]):
             x, y = torch.where(padding_mask[i])
@@ -293,8 +300,52 @@ class INR(pl.LightningModule):
             slice_pred = slice_pred_.reshape(img.shape)
             diff = (img-slice_pred).abs()
             vis = torch.cat((img, slice_pred, diff), dim=1)
+            vis = (vis.clamp(min=0.0, max=1.0) * 255).to(torch.uint8)
+            vis = vis.detach().cpu().numpy()
             slices.append(vis)
-        return slices
+        self.logger.log_image(f"validation/end_recon_{subj_idx}", slices)
+
+
+    def log_val_point_cloud(self, subj_idx: int, draw_seg: bool = True,
+                            seg_dist_thresh: float = 0.15, coord_split: int = 500):
+        # Log cloud point
+        batch = self.trainer.datamodule.val_dset.generate_item(subj_idx, 1.0, frame=0)
+        coords_voxel, values, aff_params, spacings, needs_flip, _, slice_idx, min_coords, max_coords, segs = batch
+        coords_voxel = coords_voxel.cuda()[None]
+        values = values.cuda()
+        aff_params = aff_params.cuda()[None]
+        spacings = spacings.cuda()[None]
+        needs_flip = needs_flip.cuda()[None]
+        slice_idx = slice_idx.cuda()[None]
+        min_coords = min_coords.cuda()[None]
+        max_coords = max_coords.cuda()[None]
+        segs = segs.cuda()
+        world_coords = self.forward_coord_model(coords_voxel, aff_params, torch.zeros_like(aff_params),
+                                                spacings, needs_flip, slice_idx, min_coords, max_coords)
+        del min_coords, max_coords, slice_idx, needs_flip, spacings, aff_params
+        world_coords = world_coords[0, ..., :-1]
+        values = (values.clamp(min=0.0, max=1.0) * 255)
+
+        selection = []
+        for i in tqdm(range(0, coord_split)):
+            idx1 = int(world_coords.shape[0] * (i / coord_split))
+            idx2 = int(world_coords.shape[0] * (i + 1) / coord_split)
+            s = compute_neighbourhood_matrix(world_coords[idx1:idx2], world_coords[segs.any(dim=-1)],
+                                             dist_thresh=seg_dist_thresh)
+            selection.append(s)
+        del s
+        selection = torch.cat(selection)
+        # selection = torch.logical_and(selection, values[..., 0] > 70)
+        values = torch.cat([values[selection]] * 3, dim=-1)
+        if draw_seg:
+            segs = torch.cat([segs[selection]] * 3, dim=-1)
+            values = torch.where(segs == 1, torch.tensor((255, 0, 0)).cuda(), values)
+            values = torch.where(segs == 2, torch.tensor((0, 255, 0)).cuda(), values)
+            values = torch.where(segs == 3, torch.tensor((0, 255, 255)).cuda(), values)
+
+        cloud_point = torch.cat([world_coords[selection], values], dim=-1).detach().cpu().numpy()
+        wandb.log({f"validation/img_cloud_{subj_idx}": wandb.Object3D(cloud_point)})
+        del selection, cloud_point
 
     @staticmethod
     def min_max_scale(X, x_min, x_max,  s_min=-1, s_max=1):
