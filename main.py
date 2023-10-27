@@ -49,6 +49,7 @@ class INR(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, **kwargs):
         super(INR, self).__init__()
         self.automatic_optimization = False
+        self.val_rate = kwargs.get("check_val_every_n_epoch", 50)
 
         self.coord_size = coord_size
         self.intensity_size = 1
@@ -195,7 +196,7 @@ class INR(pl.LightningModule):
         return values
 
     def training_step(self, batch):
-        opt_inr, opt_enc, opt_aff = self.optimizers()
+        opt_inr, opt_enc = self.optimizers()
 
         coords_voxel, values, aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords, _ = batch
 
@@ -211,14 +212,19 @@ class INR(pl.LightningModule):
 
         opt_inr.zero_grad()
         opt_enc.zero_grad()
-        opt_aff.zero_grad()
+        # opt_aff.zero_grad()
         # opt_deform.zero_grad()
         self.manual_backward(loss)
         opt_inr.step()
         opt_enc.step()
-        opt_aff.step()
+        # opt_aff.step()
         # opt_deform.step()
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
+        if self.current_epoch % self.val_rate == 0:
+            for i in range(subject_idx.shape[0]):
+                idx = int(subject_idx[i])
+                if idx < 10:
+                    self.log_slice_images(int(subject_idx[0]), aff_params_deform, dset=self.trainer.datamodule.train_dset, log_key="training")
 
     # @torch.enable_grad()
     def validation_step(self, batch, batch_idx):
@@ -226,7 +232,7 @@ class INR(pl.LightningModule):
         # We will only be optimizing the affine params. We ignore the INR and encoder optimizer.
         # self.train()
         # _, opt_aff = self.optimizers()
-        aff_params_deform = nn.Parameter(torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda:0"))
+        aff_params_deform = nn.Parameter(torch.zeros((aff_params.shape[0], aff_params.shape[0], 6), dtype=torch.float32, device="cuda:0"))
         # start_loss = self.validation_loss(batch_idx, aff_params_deform)
         # self.log("validation/start_loss", start_loss)
         # start_recon = self.val_image(batch_idx, aff_params_deform)
@@ -282,9 +288,11 @@ class INR(pl.LightningModule):
     #     # loss_recon = self.recon_loss(values_pred, values_deform)
     #     return 0.0
 
-    def log_val_slice_images(self, subj_idx, aff_params_deform, frame_idx: int = 0):
+    def log_slice_images(self, subj_idx, aff_params_deform, frame_idx: int = 0, dset = None, log_key="validation"):
         # Visualize slices
-        batch = self.trainer.datamodule.val_dset.load_subject_data(subj_idx, frame_idx=frame_idx)
+        if dset is None:
+            dset = self.trainer.datamodule.val_dset
+        batch = dset.load_subject_data(subj_idx, frame_idx=frame_idx)
         batch = [i.cuda() for i in batch]
         img_values, padding_mask, indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded, _ = batch
@@ -304,7 +312,8 @@ class INR(pl.LightningModule):
             vis = (vis.clamp(min=0.0, max=1.0) * 255).to(torch.uint8)
             vis = vis.detach().cpu().numpy()
             slices.append(vis)
-        wandb.log({f"validation/end_recon_slices_(frame_{frame_idx})_{subj_idx}": slices})
+        slices = [wandb.Image(arr) for arr in slices]
+        wandb.log({f"{log_key}/end_recon_slices_(frame_{frame_idx})_{subj_idx}": slices})
 
     def log_val_slice_videos(self, subj_idx, aff_params_deform, time_delta=2, heartbeat_duration: int = 5.0):
         """ Log cardiac cycle videos to WANDB for every slice of the subject.
