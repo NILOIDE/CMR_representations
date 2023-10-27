@@ -1,7 +1,8 @@
+from typing import Tuple, Dict, Optional
+from dataclasses import dataclass
 import math
 import os
-from dataclasses import dataclass
-from typing import Tuple, Dict, Optional
+import numpy as np
 
 import torch
 import lightning.pytorch as pl
@@ -84,10 +85,10 @@ class INR(pl.LightningModule):
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.decoder.parameters(), *self.recon_layer.parameters()], lr=1e-4)
         opt_enc = torch.optim.Adam(self.encoder.parameters(), lr=1e-4)
-        opt_aff = torch.optim.Adam([self.aff_deform_params], lr=1e-3)
+        # opt_aff = torch.optim.Adam([self.aff_deform_params], lr=1e-3)
         # opt_deform = torch.optim.Adam([w for inr in self.coord_deform_inrs.values() for w in inr.weights] +
         #                               [b for inr in self.coord_deform_inrs.values() for b in inr.biases], lr=1e-3)
-        return opt_inr, opt_enc, opt_aff
+        return opt_inr, opt_enc#, opt_aff
 
     def regularization_criterion(self, subj_idx: torch.Tensor) \
             -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -258,8 +259,9 @@ class INR(pl.LightningModule):
         with torch.no_grad():
             # Log point cloud
             self.log_val_point_cloud(int(subject_idx[0]), draw_seg=True)
-            # Log individual 2D slices
-            self.log_val_slices(int(subject_idx[0]), aff_params_deform)
+            # Log 2D slices
+            self.log_val_slice_videos(int(subject_idx[0]), aff_params_deform)
+            self.log_val_slice_images(int(subject_idx[0]), aff_params_deform)
 
     # def validation_loss(self, batch_idx, aff_params_deform):
     #     batch = self.trainer.datamodule.val_dset.generate_item(batch_idx, 1.0)
@@ -280,9 +282,8 @@ class INR(pl.LightningModule):
     #     # loss_recon = self.recon_loss(values_pred, values_deform)
     #     return 0.0
 
-    def log_val_slices(self, subj_idx, aff_params_deform):
+    def log_val_slice_images(self, subj_idx, aff_params_deform, frame_idx: int = 0):
         # Visualize slices
-        frame_idx = 0
         batch = self.trainer.datamodule.val_dset.load_subject_data(subj_idx, frame_idx=frame_idx)
         batch = [i.cuda() for i in batch]
         img_values, padding_mask, indices, min_coords, max_coords, \
@@ -303,8 +304,46 @@ class INR(pl.LightningModule):
             vis = (vis.clamp(min=0.0, max=1.0) * 255).to(torch.uint8)
             vis = vis.detach().cpu().numpy()
             slices.append(vis)
-        self.logger.log_image(f"validation/end_recon_{subj_idx}", slices)
+        wandb.log({f"validation/end_recon_slices_(frame_{frame_idx})_{subj_idx}": slices})
 
+    def log_val_slice_videos(self, subj_idx, aff_params_deform, time_delta=2, heartbeat_duration: int = 5.0):
+        """ Log cardiac cycle videos to WANDB for every slice of the subject.
+        :param subj_idx:
+        :param aff_params_deform:
+        :param time_delta: Time downsample factor. Avoid processing every frame by setting time_delta to >1.
+        :param heartbeat_duration: How long the entire heartbeat movie should last (in seconds) in video form.
+        """
+        # Visualize slices
+        batch = self.trainer.datamodule.val_dset.load_subject_data(subj_idx, frame_idx=0)
+        num_slices = batch[0].shape[0]
+        slices = {i: [] for i in range(0, num_slices)}  # Keys are each possible slice of the subject
+
+        for t in tqdm(range(0, 50, time_delta), desc=f"Generating video for subject {subj_idx}"):
+            batch = self.trainer.datamodule.val_dset.load_subject_data(subj_idx, frame_idx=t)
+            batch = [i.cuda() for i in batch]
+            img_values, padding_mask, indices, min_coords, max_coords, \
+                aff_params_padded, spacings_padded, needs_flip_padded, _ = batch
+            for i in range(0, img_values.shape[0]):
+                x, y = torch.where(padding_mask[i])
+                img = img_values[i, :x.max().item(), :y.max().item()]
+                indices = torch.meshgrid(torch.arange(0, img.shape[0]), torch.arange(0, img.shape[1]), torch.tensor([0]), torch.tensor([t]))
+                indices_ = torch.stack([i.reshape(-1) for i in indices], dim=1).cuda()
+                slice_pred_ = self.forward(indices_[None], img.reshape((-1, 1))[None], aff_params_padded[None],
+                                           spacings_padded[None], needs_flip_padded[None], None,
+                                           torch.full((1, indices_.shape[0],), i, device="cuda"), min_coords[None], max_coords[None],
+                                           aff_params_deform=aff_params_deform)
+                slice_pred = slice_pred_.reshape(img.shape)
+                diff = (img-slice_pred).abs()
+                vis = torch.cat((img, slice_pred, diff), dim=1)
+                vis = (vis.clamp(min=0.0, max=1.0) * 255).to(torch.uint8)
+                vis = torch.stack([vis]*3, dim=0)
+                vis = vis.detach().cpu().numpy()
+                slices[i].append(vis)
+        wandb_fps_not_working_correctly_factor = 2
+        fps = int(50/time_delta/heartbeat_duration) // wandb_fps_not_working_correctly_factor
+        fps = max(fps, 1)
+        videos = [wandb.Video(np.stack(video, 0), fps=fps, format="gif") for i, video in slices.items()]
+        wandb.log({f"validation/end_recon_videos_{subj_idx}": videos})
 
     def log_val_point_cloud(self, subj_idx: int, draw_seg: bool = True,
                             seg_dist_thresh: float = 0.15, coord_split: int = 500):
@@ -327,18 +366,18 @@ class INR(pl.LightningModule):
         values = (values.clamp(min=0.0, max=1.0) * 255)
 
         selection = []
-        for i in tqdm(range(0, coord_split)):
-            idx1 = int(world_coords.shape[0] * (i / coord_split))
-            idx2 = int(world_coords.shape[0] * (i + 1) / coord_split)
+        for i in tqdm(range(0, coord_split), desc=f"Processing cloud point for subject {subj_idx}"):
+            idx1 = world_coords.shape[0] * i // coord_split
+            idx2 = world_coords.shape[0] * (i + 1) // coord_split
             s = compute_neighbourhood_matrix(world_coords[idx1:idx2], world_coords[segs.any(dim=-1)],
                                              dist_thresh=seg_dist_thresh)
             selection.append(s)
         del s
-        selection = torch.cat(selection)
+        selection = torch.cat(selection, dim=0)
         # selection = torch.logical_and(selection, values[..., 0] > 70)
-        values = torch.cat([values[selection]] * 3, dim=-1)
+        values = torch.stack([values[selection, 0]] * 3, dim=-1)
         if draw_seg:
-            segs = torch.cat([segs[selection]] * 3, dim=-1)
+            segs = torch.stack([segs[selection, 0]] * 3, dim=-1)
             values = torch.where(segs == 1, torch.tensor((255, 0, 0)).cuda(), values)
             values = torch.where(segs == 2, torch.tensor((0, 255, 0)).cuda(), values)
             values = torch.where(segs == 3, torch.tensor((0, 255, 255)).cuda(), values)
