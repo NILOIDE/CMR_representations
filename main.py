@@ -212,7 +212,7 @@ class INR(pl.LightningModule):
         loss_recon = self.recon_loss(values_pred, values_deform[..., 0])
 
         loss_reg, loss_reg_dict = self.regularization_criterion(subject_idx)
-        loss = loss_recon #+ loss_reg
+        loss = loss_recon + loss_reg
 
         opt_inr.zero_grad()
         opt_enc.zero_grad()
