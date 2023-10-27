@@ -61,8 +61,38 @@ class Sine(Layer):
                                         math.sqrt(6 / num_input) / self.siren_factor)
 
 
+class WIRE(Layer):
+    '''
+        Implicit representation with Gabor nonlinearity
+
+        Inputs;
+            in_size: Input features
+            out_size; Output features
+            bias: if True, enable bias for the linear operation
+            omega_0: Legacy SIREN parameter
+            omega: Frequency of Gabor sinusoid term
+            scale: Scaling of Gabor Gaussian term
+    '''
+    LUT_NAME = "wire"
+
+    def __init__(self, in_size, out_size, bias=True, **kwargs):
+        super(WIRE, self).__init__(in_size, out_size, **kwargs)
+        self.omega_0 = kwargs.get("wire_omega_0", 10.0)  # Freq
+        self.scale_0 = kwargs.get("wire_scale_0", 10.0)
+        self.freqs = nn.Linear(in_size, out_size, bias=bias)
+        self.scale = nn.Linear(in_size, out_size, bias=bias)
+
+    def forward(self, x):
+        omega = self.omega_0 * self.freqs(x)
+        scale = self.scale(x) * self.scale_0
+        x = torch.cos(omega) * torch.exp(-(scale * scale))
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return x
+
+
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_q, d_k, d_v, d_model, d_out=None, num_heads=1):
+    def __init__(self, d_q, d_k, d_v, d_model, d_out=None, num_heads=1, **kwargs):
         """
         :param d_q: Dimension size of Query input
         :param d_k: Dimension size of Keys input
@@ -72,6 +102,7 @@ class MultiHeadAttention(nn.Module):
         """
         super(MultiHeadAttention, self).__init__()
         d_out = d_out if d_out is not None else d_model
+        factory_kwargs = {'device': kwargs.get("device", None), 'dtype': kwargs.get("dtype", None)}
 
         self.q_d = d_q
         self.k_d = d_k
@@ -80,10 +111,14 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k = d_k // num_heads
 
-        self.W_q = nn.Linear(d_q, d_model)
-        self.W_k = nn.Linear(d_k, d_model)
-        self.W_v = nn.Linear(d_v, d_model)
-        self.W_o = nn.Linear(d_model, d_out)
+        self.W_q = torch.nn.Parameter(torch.empty((d_q, d_model), **factory_kwargs))
+        self.W_k = torch.nn.Parameter(torch.empty((d_k, d_model), **factory_kwargs))
+        self.W_v = torch.nn.Parameter(torch.empty((d_v, d_model), **factory_kwargs))
+        self.W_o = torch.nn.Parameter(torch.empty((d_model, d_out), **factory_kwargs))
+        torch.nn.init.xavier_uniform_(self.W_q)
+        torch.nn.init.xavier_uniform_(self.W_k)
+        torch.nn.init.xavier_uniform_(self.W_v)
+        torch.nn.init.xavier_uniform_(self.W_o)
 
     def scaled_dot_product_attention(self, Q, K, V, attn_mask=None):
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
@@ -102,16 +137,16 @@ class MultiHeadAttention(nn.Module):
         return x.transpose(1, 2).contiguous().view(batch_size, seq_length, self.d_out)
 
     def forward(self, Q, K, V, attn_mask=None):
-        Q = self.W_q(Q)
-        K = self.W_k(K)
-        V = self.W_v(V)
+        Q = Q @ self.W_q
+        K = K @ self.W_k
+        V = V @ self.W_v
         Q = self.split_heads(Q)
         K = self.split_heads(K)
         V = self.split_heads(V)
 
         attn_output = self.scaled_dot_product_attention(Q, K, V, attn_mask)
         output = self.combine_heads(attn_output)
-        output = self.W_o(output)
+        output = output @ self.W_o
         return output
 
 
@@ -121,7 +156,7 @@ class AttentionLayer(nn.Module):
                  layer_norm_eps: float = 1e-5, **kwargs) -> None:
         factory_kwargs = {'device': kwargs.get("device", None), 'dtype': kwargs.get("dtype", None)}
         super(AttentionLayer, self).__init__()
-        self.attn = MultiHeadAttention(d_q, d_k, d_v, d_model, d_out, nhead)
+        self.attn = MultiHeadAttention(d_q, d_k, d_v, d_model, d_out, nhead, **kwargs)
         self.linear1 = activation_class(d_out, dim_feedforward, **kwargs)
         self.linear2 = nn.Linear(dim_feedforward, d_out, **factory_kwargs)
 
@@ -138,6 +173,7 @@ class AttentionLayer(nn.Module):
         x = self.norm1(self.dropout(self.attn(q, k, v, attn_mask=attn_mask)))
         x = self.norm2(x + self.dropout(self.linear2(self.linear1(x))))
         return x
+
 
 
 class CrossAttentionLayer(nn.Module):

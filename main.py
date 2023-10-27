@@ -48,6 +48,7 @@ class MultiSliceMLP(nn.Module):
 class INR(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, **kwargs):
         super(INR, self).__init__()
+        self.hparams.update(kwargs)
         self.automatic_optimization = False
         self.val_rate = kwargs.get("check_val_every_n_epoch", 50)
 
@@ -57,14 +58,14 @@ class INR(pl.LightningModule):
         self.max_slices = max_slices
 
         self.enc_pos_encoding = PosEncodingGaussian(self.coord_size, self.intensity_size,
-                                                    nerf_num_frequencies=[8]*(self.coord_size + self.intensity_size),
-                                                    gauss_num_frequencies=(64,),
-                                                    freq_scale=[5.0])
+                                                    nerf_num_frequencies=[kwargs.get("nerf_num_frequencies", 8)]*(self.coord_size + self.intensity_size),
+                                                    gauss_num_frequencies=(kwargs.get("gauss_num_frequencies", 64),),
+                                                    freq_scale=[kwargs.get("freq_scale", 1.0)])
         print(self.enc_pos_encoding)
         self.dec_pos_encoding = PosEncodingGaussian(self.coord_size,
-                                                    nerf_num_frequencies=[8]*self.coord_size,
-                                                    gauss_num_frequencies=(64,),
-                                                    freq_scale=[5.0])
+                                                    nerf_num_frequencies=[kwargs.get("nerf_num_frequencies", 8)]*self.coord_size,
+                                                    gauss_num_frequencies=(kwargs.get("gauss_num_frequencies", 64),),
+                                                    freq_scale=[kwargs.get("freq_scale", 1.0)])
         print(self.dec_pos_encoding)
 
         self.encoder = PerceiverEncoder(self.enc_pos_encoding.out_dim, **kwargs)
@@ -77,11 +78,14 @@ class INR(pl.LightningModule):
         #                           for subj_idx in range(self.num_subjects)}
 
         self.recon_loss = torch.nn.MSELoss()
-        self.weight_reg_inr = 1e-4
-        self.weight_reg_enc = 1e-4
-        self.weight_reg_aff = 1e-1
+        self.weight_reg_inr = kwargs.get("weight_reg_inr", 0.0)
+        self.weight_reg_enc = kwargs.get("weight_reg_enc", 0.0)
+        self.weight_reg_aff = kwargs.get("weight_reg_aff", 0.0)
         # self.weight_reg_deform = 1e-3
         # self.inference_opt_steps = 100
+
+    def on_fit_start(self) -> None:
+        self.logger.log_hyperparams(self.hparams)
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.decoder.parameters(), *self.recon_layer.parameters()], lr=1e-4)
@@ -208,7 +212,7 @@ class INR(pl.LightningModule):
         loss_recon = self.recon_loss(values_pred, values_deform[..., 0])
 
         loss_reg, loss_reg_dict = self.regularization_criterion(subject_idx)
-        loss = loss_recon + loss_reg
+        loss = loss_recon #+ loss_reg
 
         opt_inr.zero_grad()
         opt_enc.zero_grad()
@@ -264,10 +268,10 @@ class INR(pl.LightningModule):
 
         with torch.no_grad():
             # Log point cloud
-            self.log_val_point_cloud(int(subject_idx[0]), draw_seg=True)
-            # Log 2D slices
-            self.log_val_slice_videos(int(subject_idx[0]), aff_params_deform)
-            self.log_val_slice_images(int(subject_idx[0]), aff_params_deform)
+            # self.log_val_point_cloud(int(subject_idx[0]), draw_seg=True)
+            # # Log 2D slices
+            # self.log_val_slice_videos(int(subject_idx[0]), aff_params_deform)
+            self.log_slice_images(int(subject_idx[0]), aff_params_deform)
 
     # def validation_loss(self, batch_idx, aff_params_deform):
     #     batch = self.trainer.datamodule.val_dset.generate_item(batch_idx, 1.0)
@@ -402,14 +406,30 @@ class INR(pl.LightningModule):
 
 @dataclass
 class Params:
-    check_val_every_n_epoch: int = 10
-    num_hidden_layers: int = 4
-    enc_num_hidden_layers: int = 4
+    # Trainer
+    check_val_every_n_epoch: int = 100
+    max_epochs: int = 1_000_000
+    # Dataloader
+    num_train: int = 100
+    num_val: int = 10
+    num_test: int = 10
+    batch_size: int = 1
+    num_coords: int = 20_000
+    num_workers: int = 0
+    # Network
+    num_hidden_layers: int = 8
+    enc_num_hidden_layers: int = 8
     deform_num_hidden_layers: int = 4
     hidden_size: int = 128
-    max_epochs: int = 1_000_000
     siren_factor: float = 30.0
-
+    # Regularization
+    weight_reg_inr: float = 0
+    weight_reg_enc: float = 0
+    weight_reg_aff: float = 0
+    # Positional encoding
+    nerf_num_frequencies: int = 8
+    gauss_num_frequencies: int = 64
+    freq_scale: float = 1.0
 
 def main(work_dir, wandb_disabled="true"):
     # os.environ['WANDB_DISABLED'] = wandb_disabled
@@ -420,12 +440,11 @@ def main(work_dir, wandb_disabled="true"):
     devices = 1  # one GPU only
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    data_module = CMRDataModule(load_la_dir=r"D:\UKBB_subjects", load_sa_dir=r"D:\UKBB_subjects_unaligned",
-                                batch_size=1, num_coords=20000, num_workers=0)
+    params = Params()
+    data_module = CMRDataModule(load_la_dir=r"D:\UKBB_subjects", load_sa_dir=r"D:\UKBB_subjects_unaligned", **params.__dict__)
     data_module.setup(stage="fit")
 
     coord_size = data_module.get_coord_size()
-    params = Params()
 
     model = INR(coord_size=coord_size, num_subjects=data_module.num_train, max_slices=data_module.get_max_slices(), **params.__dict__)
 

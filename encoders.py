@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import math
 
-from layers import AttentionLayer, CrossAttentionLayer, SelfAttentionLayer
+from layers import AttentionLayer, CrossAttentionLayer, SelfAttentionLayer, WIRE, Relu
 
 
 class PerceiverEncoder(nn.Module):
@@ -17,27 +17,48 @@ class PerceiverEncoder(nn.Module):
 
         self.latent = nn.Parameter(torch.randn(latent_nodes, latent_size))
 
-        a = [AttentionLayer(latent_size,
-                            in_size,
-                            in_size,
+        # a = [AttentionLayer(latent_size,
+        #                     in_size,
+        #                     in_size,
+        #                     latent_size,
+        #                     latent_size,
+        #                     self.att_heads,
+        #                     dim_feedforward=hidden_size,
+        #                     **kwargs)
+        #      for i in range(enc_num_hidden_layers)]
+        # self.ca_layers = nn.ModuleList(a)
+        #
+        # a = [AttentionLayer(latent_size,
+        #                     latent_size,
+        #                     latent_size,
+        #                     latent_size,
+        #                     latent_size,
+        #                     self.att_heads,
+        #                     dim_feedforward=hidden_size,
+        #                     **kwargs)
+        #      for i in range(enc_num_hidden_layers)]
+        # self.sa_layers = nn.ModuleList(a)
+
+        a = [CrossAttentionLayer(
                             latent_size,
                             latent_size,
                             self.att_heads,
                             dim_feedforward=hidden_size,
+                            activation_class=Relu,
+                            batch_first=True,
                             **kwargs)
              for i in range(enc_num_hidden_layers)]
         self.ca_layers = nn.ModuleList(a)
 
-        a = [AttentionLayer(latent_size,
-                            latent_size,
-                            latent_size,
+        a = [SelfAttentionLayer(
                             latent_size,
                             latent_size,
                             self.att_heads,
                             dim_feedforward=hidden_size,
+                            activation_class=Relu,
+                            batch_first=True,
                             **kwargs)
              for i in range(enc_num_hidden_layers)]
-
         self.sa_layers = nn.ModuleList(a)
 
         self.out_size = latent_size

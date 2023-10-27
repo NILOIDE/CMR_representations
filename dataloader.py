@@ -16,7 +16,8 @@ from utils import normalize_image_with_percentile, mat_to_params, make_masked_co
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self, load_la_dir: str = r"D:\UKBB_subjects", load_sa_dir: str = r"D:\UKBB_subjects_unaligned",
-                 batch_size: int = 32, num_coords: int = 4000, num_workers: int = 0):
+                 batch_size: int = 32, num_coords: int = 4000, num_workers: int = 0,
+                 num_train: int = 100, num_val: int = 10, num_test: int = 10, **kwargs):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
@@ -28,9 +29,9 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 100
-        self.num_val = 10
-        self.num_test = 10
+        self.num_train = num_train
+        self.num_val = num_val
+        self.num_test = num_test
         self.max_slices = -1
         self.num_workers = num_workers
 
@@ -41,7 +42,7 @@ class CMRDataModule(pl.LightningDataModule):
             with open(pickle_name, 'rb') as handle:
                 subject_data, self.max_slices = pickle.load(handle)
         except FileNotFoundError:
-            subject_data, self.max_slices = self.find_subjects(max_num=num_subjects)
+            subject_data, self.max_slices = self.find_subjects(num_subjects)
             with open(pickle_name, 'wb') as handle:
                 pickle.dump([subject_data, self.max_slices], handle, protocol=pickle.HIGHEST_PROTOCOL)
         assert len(subject_data) == num_subjects
@@ -49,9 +50,9 @@ class CMRDataModule(pl.LightningDataModule):
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(subject_data))), split)]
 
-        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs],
+        self.train_dset = CardiacUKBB([subject_data[0] for i in train_idxs],
                                       num_coords=self.num_coords)
-        self.val_dset = CardiacUKBB([subject_data[i] for i in val_idxs],
+        self.val_dset = CardiacUKBB([subject_data[0] for i in val_idxs],
                                     num_coords=self.num_coords)
         self.test_dset = CardiacUKBB([subject_data[i] for i in test_idxs],
                                      num_coords=self.num_coords)
@@ -81,7 +82,7 @@ class CMRDataModule(pl.LightningDataModule):
     def test_dataloader(self):
         return self._test_dataloader
 
-    def find_subjects(self, max_num=100, **kwargs):
+    def find_subjects(self, max_num, **kwargs):
         count = 0
         max_slices = 0
         images = []

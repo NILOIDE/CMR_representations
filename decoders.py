@@ -3,7 +3,7 @@ from typing import List
 from torch import nn
 import torch
 
-from layers import Sine, Relu, AttentionLayer, CrossAttentionLayer
+from layers import Sine, Relu, AttentionLayer, CrossAttentionLayer, WIRE
 
 
 class ReconstructionHead(nn.Module):
@@ -65,13 +65,21 @@ class CADecoder(nn.Module):
     def __init__(self, coord_size: int, latent_size: int, num_hidden_layers: int = 4, hidden_size: int = 128, **kwargs):
         super(CADecoder, self).__init__()
         self.att_heads = kwargs.get("dec_att_num_heads", 1)
-        a = [AttentionLayer(coord_size if i == 0 else hidden_size,
-                            latent_size,
-                            latent_size,
+        # a = [AttentionLayer(coord_size if i == 0 else hidden_size,
+        #                     latent_size,
+        #                     latent_size,
+        #                     hidden_size,
+        #                     hidden_size,
+        #                     self.att_heads,
+        #                     activation_class=Relu,
+        #                     )
+        #      for i in range(num_hidden_layers)]
+        a = [CrossAttentionLayer(
                             hidden_size,
                             hidden_size,
                             self.att_heads,
                             activation_class=Relu,
+                            batch_first=True,
                             )
              for i in range(num_hidden_layers)]
         self.mlp = nn.ModuleList(a)
