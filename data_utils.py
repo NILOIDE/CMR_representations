@@ -11,6 +11,11 @@ import nibabel as nib
 from tqdm import tqdm
 
 
+def array_to_nifti(path: str, image: np.array, aff: np.array):
+    nii = nib.Nifti1Image(image, affine=aff)
+    nib.save(nii, path)
+
+
 @dataclass
 class SubjectFiles:
     name: str = None
@@ -161,8 +166,8 @@ def download_subject_images(subject_list: List[str],
         final_file_path = Path(download_dir) / subject_id
 
         # SAX download
-        remote_file_path = os.path.join(subject_subdir, "sa_ED.nii.gz")
-        local_file_path_sax = local_file_path / "sa_ED.nii.gz"
+        remote_file_path = os.path.join(subject_subdir, "sa.nii.gz")
+        local_file_path_sax = local_file_path / "sa.nii.gz"
         if not local_file_path_sax.exists():
             try:
                 scp.get(remote_file_path, str(local_file_path_sax))
@@ -265,6 +270,8 @@ def download_subject_images(subject_list: List[str],
                 if remove_subj_on_issue:
                     shutil.rmtree(local_file_path)
                     continue
+        if final_file_path.exists():
+            shutil.rmtree(final_file_path)
         os.rename(str(local_file_path), str(final_file_path))
         count += 1
         if count % 200 == 0:
@@ -279,16 +286,17 @@ def download_subject_images(subject_list: List[str],
 
 def download_substring_matching_subjects(keys: List[str],
                                          download_dir: str,
-                                         hostname="131.159.110.19",
+                                         hostname="131.159.110.9",
                                          username="stol",
                                          password=":)",
                                          subjects_folder="/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/",
+                                         max_download_num=-1,
                                          ):
     import paramiko
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    ssh.connect(hostname=hostname, username=username, password=password)
+    ssh.connect(hostname=hostname, username=username, password=password, disabled_algorithms={'pubkeys': ['rsa-sha2-256', 'rsa-sha2-512']})
     sftp = ssh.open_sftp()
     subjects = []
     for entry in sftp.listdir_attr(subjects_folder):
@@ -304,7 +312,7 @@ def download_substring_matching_subjects(keys: List[str],
 
     sftp.close()
     ssh.close()
-    download_subject_images(subjects, download_dir, hostname=hostname, username=username, password=password, subjects_folder=subjects_folder)
+    download_subject_images(subjects, download_dir, hostname=hostname, username=username, password=password, subjects_folder=subjects_folder, max_download_num=max_download_num)
 
 
 if __name__ == '__main__':

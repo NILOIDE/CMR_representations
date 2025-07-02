@@ -1,9 +1,11 @@
+import shutil
 import time
 from pathlib import Path
 from typing import Optional, Tuple, List, Union
 import numpy as np
 import nibabel as nib
 import torch
+from kornia.filters import spatial_gradient
 from torch.utils.data import Dataset, DataLoader, random_split
 import lightning.pytorch as pl
 import pickle
@@ -16,10 +18,13 @@ from utils import normalize_image_with_percentile, mat_to_params, make_masked_co
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self, load_la_dir: str = r"D:\UKBB_subjects", load_sa_dir: str = r"D:\UKBB_subjects_unaligned",
+                 preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5", replace_existing_processed=False,
                  batch_size: int = 32, num_coords: int = 4000, num_workers: int = 0):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
+        self.store_path = preprocessed_store_path
+        self.replace_existing_processed = False
         self.batch_size = batch_size
         self.num_coords = num_coords
         self.train_dset = None
@@ -28,7 +33,7 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 100
+        self.num_train = 1000
         self.num_val = 10
         self.num_test = 10
         self.max_slices = -1
@@ -49,7 +54,7 @@ class CMRDataModule(pl.LightningDataModule):
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(subject_data))), split)]
 
-        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs],
+        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs][:12], # TODO
                                       num_coords=self.num_coords)
         self.val_dset = CardiacUKBB([subject_data[i] for i in val_idxs],
                                     num_coords=self.num_coords)
@@ -116,15 +121,26 @@ class CMRDataModule(pl.LightningDataModule):
         assert count == max_num
         print(f"Found {len(images)} subjects.")
 
-        subject_data_paths = self.preprocess_subject_data(images, segs, max_slices)
+        subject_data_paths = self.preprocess_subject_data(images, segs, max_slices,
+                                                          replace_existing=self.replace_existing_processed)
 
         return subject_data_paths, max_slices
 
     def preprocess_subject_data(self, subj_paths, seg_paths, max_slices,
-                                store_path=r"D:\UKBB_subjects_unaligned", replace_existing=True):
-        store_path = Path(store_path)
+                                replace_existing=True):
+        if replace_existing:
+            print("Replacing existing preprocessed files.")
+        store_path = Path(self.store_path)
         prepr_data_paths = []
         for subj_slices in tqdm(subj_paths, desc="Preprocessing subject data into torch tensor."):
+            # If file already exists, add path to list and continue
+            subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
+            save_path = store_path / subject_id / "prep_data.h5"
+            if save_path.exists() and not replace_existing:
+                prepr_data_paths.append(str(save_path))
+                continue
+
+            # Otherwise, preprocess subject
             coord_max = []
             coord_min = []
             images = []
@@ -184,16 +200,18 @@ class CMRDataModule(pl.LightningDataModule):
             needs_flip_padded[:needs_flip.shape[0]] = needs_flip
 
             # Store preprocessed arrays to disk
-            subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
-            save_path = store_path / subject_id / "prep_data.pkl"
-            if save_path.exists():
-                os.remove(str(save_path))
-            save_path = store_path / subject_id / "prep_data.h5"
-            if save_path.exists() and replace_existing:
-                os.remove(str(save_path))
+            pkl_path = store_path / subject_id / "prep_data.pkl"
+            if pkl_path.exists():
+                os.remove(str(pkl_path))
+            if save_path.parent.exists() and replace_existing:
+                shutil.rmtree(str(save_path.parent))
+            save_path.parent.mkdir(exist_ok=True)
             while not save_path.exists() or save_path.stat().st_size < 100:
                 with h5py.File(save_path, 'w') as f:
-                    f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
+                    im_pad = im_pad * 255
+                    atlas_pad = im_pad.mean(-1)
+                    f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
+                    f.create_dataset('atlas_padded', data=atlas_pad.numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
                     f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
                     f.create_dataset('coord_max', data=subj_coord_max.numpy(), compression=1)
                     f.create_dataset('coord_min', data=subj_coord_min.numpy(), compression=1)
@@ -231,7 +249,10 @@ class CardiacUKBB(Dataset):
 
         with h5py.File(self.data_paths[subj_idx], 'r') as f:
             # Load only the randomly selected image frame from the (time, slices, H, W) volume
-            image = torch.tensor(f['image_padded'][selected_frame], dtype=torch.float32)
+            image = torch.tensor(f['image_padded'][selected_frame], dtype=torch.float32) / 255.
+            image_tp1 = torch.tensor(f['image_padded'][(selected_frame+1)%50], dtype=torch.float32) / 255.
+            image_dt = image_tp1 - image
+            # atlas = torch.tensor(f['atlas_padded'], dtype=torch.float32) / 255.
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
@@ -247,7 +268,7 @@ class CardiacUKBB(Dataset):
             aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32)
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
-        return image, full_indices, coord_max, coord_min, \
+        return image, image_dt, full_indices, coord_min, coord_max, \
             aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
@@ -255,8 +276,12 @@ class CardiacUKBB(Dataset):
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        img, non_padding_indices, min_coords, max_coords, \
+        img, img_dt, non_padding_indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
+
+        # img_d = spatial_gradient(img[:, None], mode="diff", order=1, normalized=False).abs().sum((1,2))
+        # img_dd = spatial_gradient(img[:, None], mode="diff", order=2, normalized=False).abs().sum((1,2))
+        # img = torch.stack((img, img_d, img_dd), dim=-1)
 
         if num_coords is None:
             num_coords = self.num_coords
@@ -271,13 +296,14 @@ class CardiacUKBB(Dataset):
 
         # Get image values at the indices samples
         image_values_sample = img[tuple(indices.T[:-1])]
+        image_dt_values_sample = img_dt[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
-        voxel_indices = np.concatenate((indices[:, 1:3], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=1)
+        voxel_indices = np.concatenate((indices[:, 1:-1], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         sub_idx = torch.tensor(idx, dtype=torch.long)
-        return voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
+        return voxel_indices, image_values_sample, image_dt_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
             sub_idx, slice_indices, min_coords, max_coords
 
 

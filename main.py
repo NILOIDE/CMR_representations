@@ -1,10 +1,13 @@
 import math
 import os
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from pathlib import Path
+from typing import Tuple, Dict, Optional
 
+import numpy as np
 import torch
 import lightning.pytorch as pl
+import wandb
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 from torch import nn
@@ -13,7 +16,7 @@ from torch import nn
 
 from dataloader import CMRDataModule
 from encoders import PerceiverEncoder
-from layers import Sine
+from layers import Relu
 from utils import params_to_mat
 from lightning.pytorch.loggers import WandbLogger
 
@@ -37,7 +40,7 @@ class MLP(nn.Module):
 
     def __init__(self, coord_size: int, num_hidden_layers: int, hidden_size: int, out_size: int, **kwargs):
         super(MLP, self).__init__()
-        a = [Sine(coord_size, hidden_size)]
+        a = [Relu(coord_size, hidden_size)]
         for i in range(num_hidden_layers - 2):
             a.append(Sine(hidden_size, hidden_size))
         a.append(nn.Linear(hidden_size, out_size))
@@ -234,7 +237,6 @@ class INR(pl.LightningModule):
         self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict}, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
-
 
         self.trainer.val_dataloader.dataset.generate_item(batch_idx, )
 
