@@ -166,3 +166,15 @@ def make_masked_coordinate_tensor(mask):
     coordinate_tensor = coordinate_tensor.reshape([np.prod(mask.shape), len(mask.shape)])
     coordinate_tensor = coordinate_tensor[mask.flatten(), :]
     return coordinate_tensor
+
+
+def compute_neighbourhood_matrix(coords: torch.Tensor, ref_coords: torch.Tensor, dist_thresh: float = 0.15):
+    assert len(coords.shape) == 2
+    assert len(ref_coords.shape) == 2
+    if dist_thresh < 0:
+        return torch.zeros((coords.shape[0], coords.shape[0]), dtype=torch.uint8)
+    dists = ref_coords[None].tile((coords.shape[0], 1, 1)) - coords[:, None].tile((1, ref_coords.shape[0], 1))
+    dists = dists.norm(dim=-1)
+    neigh_matrix = dists <= dist_thresh
+    within_range_mask = neigh_matrix.any(dim=-1)
+    return within_range_mask

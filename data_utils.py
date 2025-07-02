@@ -286,8 +286,9 @@ def download_subject_images(subject_list: List[str],
 
 def download_substring_matching_subjects(keys: List[str],
                                          download_dir: str,
+                                         # use selene because aimvm3 is not used anymore
                                          hostname="131.159.110.9",
-                                         username="stol",
+                                         username="siderila",
                                          password=":)",
                                          subjects_folder="/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/",
                                          max_download_num=-1,
@@ -317,11 +318,11 @@ def download_substring_matching_subjects(keys: List[str],
 
 if __name__ == '__main__':
     os.environ["KMP_DUPLICATE_LIB_OK"] = "1"
-    # remote_subj_dir = "/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/"
-    download_dir = r"D:\UKBB_subjects"
-    # password = input("Password:")
-    # download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
-    subject_list = find_subjects(download_dir, sax_slice_dataset_dir=r"D:\UKBB_subjects_unaligned")
+    remote_subj_dir = "/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/"
+    download_dir = "/home/pti/Documents/datasets/UKBB_subjects/"
+    password = input("Password:")
+    download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
+    subject_list = find_subjects(download_dir, sax_slice_dataset_dir="/home/pti/Documents/datasets/UKBB_subjects_unaligned")
     print(len(subject_list))
     # ims_, anns_ = [i for i, j, in ann_pairs], [j for i, j, in ann_pairs]
     # print(len(ann_pairs), "SAX subjects")
