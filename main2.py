@@ -6,20 +6,22 @@ from typing import Tuple, Dict, Optional, List
 
 import numpy as np
 import torch
+import tqdm
 from kornia.filters import spatial_gradient
 from torch import nn
 import lightning.pytorch as pl
 from lightning import Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
 import wandb
-from data_utils import array_to_nifti
+from monai.losses import DiceLoss
 
+from data_utils import array_to_nifti
 from dataloader import CMRDataModule
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from layers import Relu
-from utils import params_to_mat, make_coordinate_tensor
+from utils import params_to_mat, make_coordinate_tensor, to_1hot
 from lightning.pytorch.loggers import WandbLogger
-from losses import SegmentationCriterion, ReconstructionCriterion, SegmentationMetrics, ReconstructionMetrics
+from losses import SegmentationCriterion, ReconstructionCriterion, SegmentationMetrics, ReconstructionMetrics, PSNRLoss
 
 
 class MLP(nn.Module):
@@ -76,9 +78,10 @@ class INR(pl.LightningModule):
         self.logging_rate = kwargs['logging_rate']
 
         self.coord_size = coord_size
-        self.internsity_size = 1
+        self.intensity_size = 1
         self.num_subjects = num_subjects
-        self.max_slices = max_slices
+        self.max_slices = 16
+        self.norm_min, self.norm_max = 0.0, 1.0
 
         self.latent_size = kwargs["latent_size"]
         self.subj_latents = nn.Parameter(torch.randn((self.num_subjects, self.latent_size),
@@ -110,21 +113,25 @@ class INR(pl.LightningModule):
         self.canonical_inr = MLP(self.pos_enc.out_dim + self.latent_size,
                                  num_hidden_layers=kwargs['num_hidden_layers'],
                                  hidden_size=kwargs['hidden_size'],
-                                 out_size=1)
+                                 out_size=5)
 
         self.recon_loss = torch.nn.MSELoss()
+        self.class_weight = [i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']]
+        self.seg_loss = DiceLoss(softmax=False, reduction="none", weight=self.class_weight)
+        self.psnr_loss = PSNRLoss()
 
         self.weight_reg_inr = kwargs["weight_reg_inr"]
         self.weight_reg_aff = kwargs["weight_reg_aff"]
         self.weight_reg_lat = kwargs["weight_reg_lat"]
         self.weight_reg_deform = kwargs["weight_reg_deform"]
         self.weight_reg_deform_lat = kwargs["weight_reg_deform_lat"]
+        self.weight_loss_deriv = kwargs["weight_loss_deriv"]
+        self.weight_loss_hess = kwargs["weight_loss_hess"]
+        self.weight_loss_seg = kwargs["weight_loss_seg"]
         self.lr = kwargs["learning_rate"]
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
 
-        self.segmentation_metrics = SegmentationMetrics(**kwargs)
-        self.reconstruction_metrics = ReconstructionMetrics(**kwargs)
 
 
     def configure_optimizers(self):
@@ -170,24 +177,52 @@ class INR(pl.LightningModule):
         loss_dict["loss_reg"] = loss_reg
         return loss_reg, loss_dict
 
-    @torch.enable_grad
-    def forward_with_dt(self, coords_voxel, aff_params, spacings, needs_flip,
-                subject_idx, slice_idx, min_coords, max_coords):
+    def forward(self,
+                coords_voxel: torch.Tensor,
+                aff_params: torch.Tensor,
+                spacings: torch.Tensor,
+                needs_flip: torch.BoolTensor,
+                subject_idx: torch.LongTensor,
+                slice_idx: torch.LongTensor,
+                min_coords: torch.Tensor,
+                max_coords: torch.Tensor,
+                return_deriv: bool = False,
+                return_hessian: bool = False) \
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 subject_idx, slice_idx, min_coords, max_coords)
-        values_pred = self.forward_inr(world_coords, subject_idx)
-        values_pred_dt = torch.autograd.grad(values_pred.sum(), world_coords, retain_graph=True)[0][..., -1]
-        return values_pred, values_pred_dt
+        seg_pred, values_pred  = self.forward_inr(world_coords, subject_idx)
+        values_pred_d = None
+        values_pred_dd = None
+        if return_deriv:
+            values_pred_d = torch.autograd.grad(values_pred, world_coords, grad_outputs=torch.ones_like(values_pred),
+                                                 create_graph=True, retain_graph=True)[0]
+            if return_hessian:
+                # values_pred_ddx = torch.autograd.grad(values_pred_d[..., 0], world_coords,
+                #                                       grad_outputs=torch.ones_like(values_pred_d[..., 0]),
+                #                                       retain_graph=True)[0]
+                # values_pred_ddy = torch.autograd.grad(values_pred_d[..., 1], world_coords,
+                #                                       grad_outputs=torch.ones_like(values_pred_d[..., 1]),
+                #                                       retain_graph=True)[0]
+                # values_pred_ddz = torch.autograd.grad(values_pred_d[..., 2], world_coords,
+                #                                       grad_outputs=torch.ones_like(values_pred_d[..., 2]),
+                #                                       retain_graph=True)[0]
+                values_pred_ddt = torch.autograd.grad(values_pred_d[..., 3], world_coords,
+                                                      grad_outputs=torch.ones_like(values_pred_d[..., 3]),
+                                                      retain_graph=True)[0]
+                # values_pred_dd = torch.stack((values_pred_ddx, values_pred_ddy, values_pred_ddz, values_pred_ddt), -2)
+        return seg_pred, values_pred, values_pred_d, values_pred_ddt
 
-    def forward(self, coords_voxel, aff_params, spacings, needs_flip,
-                subject_idx, slice_idx, min_coords, max_coords):
-        world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
-                                                subject_idx, slice_idx, min_coords, max_coords)
-        values_pred = self.forward_inr(world_coords, subject_idx)
-        return values_pred
-
-    def forward_coord_model(self, coords_voxel, aff_params, spacings, needs_flip,
-                subject_idx, slice_idx, min_coords, max_coords):
+    def forward_coord_model(self,
+                            coords_voxel: torch.Tensor,
+                            aff_params: torch.Tensor,
+                            spacings: torch.Tensor,
+                            needs_flip: torch.BoolTensor,
+                            subject_idx: torch.LongTensor,
+                            slice_idx: torch.LongTensor,
+                            min_coords: torch.Tensor,
+                            max_coords: torch.Tensor,
+                            normalize=True):
         # Create indexing tensor to keep track of which batch is each coordinate coming from
         b, _ = torch.meshgrid(torch.arange(0, slice_idx.shape[0]), torch.arange(0, slice_idx.shape[1]))
         coords_flat_ = coords_voxel.reshape((-1, coords_voxel.shape[-1])).to(torch.float32)
@@ -213,14 +248,19 @@ class INR(pl.LightningModule):
         coords_world_ = coords_world_.squeeze(-1)
         # Add time coordinate back
         coords_world_[:, -1:] = time_coord_
+        coords_world = coords_world_.reshape(coords_voxel.shape)
 
-        # normalize coordinates [-1, 1]
-        norm_coords_ = self.min_max_scale(coords_world_, min_coords[b.reshape(-1)], max_coords[b.reshape(-1)],
-                                          s_min=-1, s_max=1)
-        norm_coords = norm_coords_.reshape(coords_voxel.shape)
-        return norm_coords
+        # normalize coordinates
+        if normalize:
+            return self.min_max_normalize(coords_world, min_coords[:, None], max_coords[:, None], self.norm_min, self.norm_max)
+        return coords_world
 
-    def forward_inr(self, coords, subj_idx):
+    def plane_deriv_to_world(self, derivs, *args, min_coords: torch.Tensor, max_coords: torch.Tensor) -> torch.Tensor:
+        derivs_world = self.forward_coord_model(derivs, *args, None, None, normalize=False)
+        derivs_world_norm = self.min_max_unnormalize(derivs_world, min_coords[:, None], max_coords[:, None], self.norm_min, self.norm_max)
+        return derivs_world_norm
+
+    def forward_inr(self, coords: torch.Tensor, subj_idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         coords = torch.cat((coords[..., :3],
                             torch.cos(coords[...,-1:] * torch.pi),
                             torch.sin(coords[...,-1:] * torch.pi)), dim=-1)
@@ -232,8 +272,9 @@ class INR(pl.LightningModule):
         # Forward INR to obtain predicted volume values
         x_ = x.reshape((-1, x.shape[-1]))
         values_pred_ = self.canonical_inr(x_)
-        values_pred = values_pred_.reshape((coords.shape[0], coords.shape[1]))
-        return values_pred
+        seg_pred = values_pred_[:, 1:].reshape((coords.shape[0], coords.shape[1], 4))
+        values_pred = values_pred_[:, 0].reshape((coords.shape[0], coords.shape[1]))
+        return seg_pred, values_pred
 
     def forward_value_deform(self, coords_voxel, values, subject_idx, slice_idx):
         # int_deform_inr = self.int_deform_inrs[subject_idx]
@@ -245,19 +286,29 @@ class INR(pl.LightningModule):
     def training_step(self, batch):
         opt_inr, opt_aff, opt_deform = self.optimizers()
 
-        (coords_voxel, values, values_dt, aff_params, spacings, needs_flip,
-         subject_idx, slice_idx, min_coords, max_coords) = batch
+        (coords_voxel, values, values_dt, values_ddt, segs, gt_avail,
+         aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords) = batch
 
         coords_voxel = coords_voxel + torch.randn(coords_voxel.shape, device=coords_voxel.device) * 5e-2  # TODO
-        values_pred, values_pred_dt = self.forward_with_dt(coords_voxel, aff_params, spacings, needs_flip,
-                                                           subject_idx, slice_idx, min_coords, max_coords)
+        seg_pred, values_pred, values_pred_d, values_pred_dd = self.forward(coords_voxel, aff_params,
+                                                                             spacings, needs_flip,
+                                                                             subject_idx, slice_idx,
+                                                                             min_coords, max_coords,
+                                                                             return_deriv=True,
+                                                                             return_hessian=True)
         values_deform = self.forward_value_deform(coords_voxel, values, subject_idx, slice_idx)
-        loss_recon = self.recon_loss(values_pred, values_deform)
-        dt_diff = (values_pred_dt * 1/50) - values_dt
-        loss_dt = (dt_diff * dt_diff).mean()
+        loss_recon = self.psnr_loss(values_pred, values_deform)
+        seg_pred, segs = torch.softmax(seg_pred, -1)*gt_avail[...,None], segs*gt_avail[...,None]
+        loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
+        dice_per_class = 1 - loss_seg_per_class
+        loss_seg = loss_seg_per_class.mean() * self.weight_loss_seg
+        # values_dt_world = self.plane_deriv_to_world(values_dt, aff_params, spacings, needs_flip, subject_idx, slice_idx,
+        #                                             min_coords=min_coords, max_coords=max_coords)
+        loss_dt = self.psnr_loss(values_pred_d[...,-1:], values_dt*50) * self.weight_loss_deriv
+        loss_ddt = self.psnr_loss(values_pred_dd[..., -1:], values_ddt*50) * self.weight_loss_hess
 
         loss_reg, loss_reg_dict = self.regularization_criterion(subject_idx)
-        loss = loss_recon + loss_reg + loss_dt
+        loss = loss_recon + loss_reg + loss_dt + loss_ddt + loss_seg
 
         opt_inr.zero_grad()
         opt_aff.zero_grad()
@@ -266,10 +317,13 @@ class INR(pl.LightningModule):
         opt_inr.step()
         opt_aff.step()
         # opt_deform.step()
-        self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict, "loss_dt": loss_dt}, prog_bar=True)
+        self.log_dict({"loss": loss, "loss_recon": loss_recon, **loss_reg_dict,
+                       "loss_dt": loss_dt, "loss_ddt": loss_ddt, "loss_seg": loss_seg}, prog_bar=True)
+        self.log_dict({"dice_BG": dice_per_class[0], "dice_LV": dice_per_class[1], "dice_MYO": dice_per_class[2],
+                       "dice_RV": dice_per_class[3]}, prog_bar=False)
 
     def on_train_epoch_end(self):
-        if self.current_epoch >= 0 and self.current_epoch % self.logging_rate == 0:
+        if self.current_epoch > 0 and (self.current_epoch == 200 or self.current_epoch % self.logging_rate == 0):
             self.log_images(0)
             self.log_images(1)
             self.log_images(2)
@@ -279,19 +333,27 @@ class INR(pl.LightningModule):
             self.log_volume(2)
 
     @staticmethod
-    def min_max_scale(X, x_min, x_max, s_min=-1., s_max=1.):
+    def min_max_normalize(X, x_min, x_max, s_min=0., s_max=1.):
         return (X - x_min) / (x_max - x_min) * (s_max - s_min) + s_min
+
+    @staticmethod
+    def min_max_unnormalize(X, x_min, x_max, s_min=0., s_max=1.):
+        return (X - s_min) / (s_max - s_min) * (x_max - x_min) + x_min
 
     @torch.no_grad()
     def log_images(self, subj_idx, video_duration: float = 4, mode="train"):
         dataset = eval(f"self.trainer.datamodule.{mode}_dset")
+        subj_path = dataset.data_paths[subj_idx]
+        subj_id = Path(subj_path).parent.name
         videos = [[] for _ in range(20)]
         preds = [[] for _ in range(20)]
+        segs = [[] for _ in range(20)]
         psnrs = [[] for _ in range(20)]
-        for t in range(0, 50, 5):
-            images, images_dt, full_indices, coord_min, coord_max, \
+        dices = [[] for _ in range(20)]
+        for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging slices subj {subj_id}"):
+            images, images_dt, images_ddt, seg_argmax, _, full_indices, coord_min, coord_max, \
                 aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, t)
-            images, images_dt = images.cuda()[None], images_dt.cuda()[None]
+            images, images_dt, images_ddt, seg_argmax = images.cuda()[None], images_dt[...,-1].cuda()[None], images_ddt[...,-1].cuda()[None], seg_argmax.cuda()[None]
             full_indices, coord_max, coord_min = full_indices.cuda()[None], coord_max.cuda()[None], coord_min.cuda()[None]
             aff_params_padded, spacings_padded, flippings_padded = aff_params_padded.cuda()[None], spacings_padded.cuda()[None], flippings_padded.cuda()[None]
             full_indices = make_coordinate_tensor(images.shape[1:]).cuda()
@@ -301,84 +363,176 @@ class INR(pl.LightningModule):
             for s in range(images.shape[1]):
                 voxel_indices_ = voxel_indices[s].reshape(1, -1, 4)
                 slice_idx_ = slice_idx[s].reshape(1, -1, 1)
-                pred_vals_, pred_vals_dt_ = self.forward_with_dt(voxel_indices_, aff_params_padded,
-                                                                 spacings_padded, flippings_padded,
-                                                                 torch.tensor((subj_idx,)), slice_idx_,
-                                                                 coord_min, coord_max)
+                with torch.enable_grad():
+                    pred_seg_, pred_vals_, pred_vals_d_, pred_vals_dd_ = self.forward(voxel_indices_, aff_params_padded,
+                                                                          spacings_padded, flippings_padded,
+                                                                          torch.tensor((subj_idx,)), slice_idx_,
+                                                                          coord_min, coord_max,
+                                                                          return_deriv=True,
+                                                                          return_hessian=True)
+                pred_seg_, pred_vals_, pred_vals_d_, pred_vals_dd_ = pred_seg_.detach(), pred_vals_.detach(), pred_vals_d_.detach(), pred_vals_dd_.detach()
                 pred_img = pred_vals_.reshape(images.shape[2:])
-                pred_img_dt = pred_vals_dt_.reshape(images.shape[2:])
+                pred_img_dt = pred_vals_d_.reshape(*images.shape[2:], pred_vals_d_.shape[-1])[...,-1]
+                pred_img_ddt = pred_vals_dd_.reshape(*images.shape[2:], *pred_vals_dd_.shape[2:])[...,-1]
                 psnr_metric = self.reconstruction_metrics.psnr(pred_img, images[0,s])
-
                 psnrs[s].append(psnr_metric.mean().item())
                 pred = pred_img.clip(0.0, 1.0)
                 pred = (pred * 255).cpu().numpy()
                 preds[s].append(pred)
+                pred_seg = pred_seg_.reshape(*images.shape[2:], pred_seg_.shape[-1])
+                pred_seg_argmax = pred_seg.argmax(-1)
+                segs[s].append(pred_seg_argmax)
+                seg_gt = to_1hot(seg_argmax[0,s].reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
+                dice = 1 - self.seg_loss(pred_seg[None].moveaxis(-1,1), seg_gt[None].moveaxis(-1,1)).mean(-1).mean(0)
+                dices[s].append(dice)
 
-                frame = torch.cat([images[0,s], pred_img, images_dt[0,s], pred_img_dt], 0)
+                # Image
+                img = torch.stack([torch.cat([images[0,s], pred_img], 0)]*3, 0)
+                # Segmentation
+                segs_argmax = torch.cat([seg_argmax[0,s], pred_seg_argmax], 0)
+                seg_frames = torch.stack([torch.cat([images[0,s], images[0,s]], 0)]*3, 0)
+                red = torch.tensor((1.0, 0.0, 0.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                green = torch.tensor((0.0, 1.0, 0.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                blue = torch.tensor((0.0, 1.0, 1.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                seg_mask = torch.stack([segs_argmax == 1] * 3, dim=0)
+                seg_frames = torch.where(seg_mask, red, seg_frames)
+                seg_mask = torch.stack([segs_argmax == 2] * 3, dim=0)
+                seg_frames = torch.where(seg_mask, green, seg_frames)
+                seg_mask = torch.stack([segs_argmax == 3] * 3, dim=0)
+                seg_frames = torch.where(seg_mask, blue, seg_frames)
+
+                # Derivatives
+                images_dt_norm = images_dt * (coord_max[:, None, -1:] - coord_min[:, None, -1:])
+                img_dt = torch.stack([torch.cat([images_dt_norm[0,s].abs(), pred_img_dt.abs()], 0)]*3, 0)
+                images_ddt_norm = images_ddt * (coord_max[:, None, -1:] - coord_min[:, None, -1:])
+                img_ddt = torch.stack([torch.cat([images_ddt_norm[0,s].abs(), pred_img_ddt.abs()], 0)]*3, 0)
+
+                frame_img = torch.cat([img, seg_frames], 1)
+                frame_d = torch.cat([img_dt, img_ddt], 1)
+                frame = torch.cat([frame_img, frame_d], 2)
                 frame = frame.clip(0.0, 1.0)
                 frame = (frame * 255).cpu().numpy().astype(np.uint8)
                 videos[s].append(frame)
         videos = [np.stack(v, 0) for v in videos if v]
-        psnrs = [np.mean(i) for i in psnrs]
-        wandb_videos = [wandb.Video(np.stack([v]*3, 1), fps=max(1, int(50 / video_duration)),
-                              caption=f"Slice:{i}, PSNR:{psnrs[i]:.2f}") for i, v in enumerate(videos)]
-        subj_path = dataset.data_paths[subj_idx]
-        subj_id = Path(subj_path).parent.name
+        psnrs = [np.mean(i) for i in psnrs if i]
+        psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
+        dices = [torch.stack(d, 0).mean(-1).mean(0) for i, d in enumerate(dices) if d]
+        dices_strings = [f"Dice:" + f"{d[1]:.2f},"[1:] + f" {d[2]:.2f},"[1:] + f" {d[3]:.2f}"[1:] if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
+        wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)),
+                              caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
         wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
 
-        images, _, full_indices, coord_max, coord_min, \
-            aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, 0)
-        save_dir = Path(f"niftis/{subj_id}")
-        save_dir.parent.mkdir(exist_ok=True)
-        save_dir.mkdir(exist_ok=True)
-        preds = [np.stack(v, 0) for v in preds if v]
-        for i, v in enumerate(preds):
-            aff_params = aff_params_padded[i][None] + self.aff_deform_params[subj_idx][i].cpu()
-            aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
-            aff = aff[0].cpu().numpy()
-            v = (v > 100).astype(np.uint8)
-            v = np.moveaxis(v[..., None], 0, -1)
-            array_to_nifti(str(save_dir / f"{self.current_epoch}_{i}.nii.gz"), v[:,:,None], aff)
+        if self.current_epoch > 0 and self.current_epoch % (self.logging_rate * 10) == 0:
+            images, _, _, _, _, full_indices, coord_max, coord_min, \
+                aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, 0)
+            save_dir = Path(f"niftis/{subj_id}")
+            save_dir.parent.mkdir(exist_ok=True)
+            save_dir.mkdir(exist_ok=True)
+            preds = [np.stack(v, 0) for v in preds if v]
+            for i, v in enumerate(preds):
+                aff_params = aff_params_padded[i][None] + self.aff_deform_params[subj_idx][i].cpu()
+                aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
+                aff = aff[0].cpu().numpy()
+                v = (v > 100).astype(np.uint8)
+                v = np.moveaxis(v[..., None], 0, -1)
+                array_to_nifti(str(save_dir / f"{self.current_epoch}_{i}.nii.gz"), v[:,:,None], aff)
 
     @torch.no_grad()
-    def log_volume(self, subj_idx, video_duration: float = 4, mode="train", res=(100, 100, 100)):
+    def log_volume(self, subj_idx, video_duration: float = 4, mode="train", res=(200, 200, 200)):
         dataset = eval(f"self.trainer.datamodule.{mode}_dset")
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
-        coords = torch.stack(torch.meshgrid(*[torch.arange(-.5, .5, 1/i) for i in res]), dim=-1)
+        coords = torch.stack(torch.meshgrid(*[torch.arange(0, 1., 1/i) for i in res]), dim=-1)
         ims = []
-        for t in range(0, 50, 5):
-            t_norm = t / 50 * 2 - 1
+        segs = []
+        for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging volume subj {subj_id}"):
+            t_norm = t / 50
             c = torch.concatenate((coords, torch.full((*res, 1), t_norm)), dim=-1).cuda()
+            z_im_slices = []
+            z_seg_slices = []
+            for z in range(res[-1]):
+                c_z = c[:,:,z:z+1]
+                pred_seg_, pred_vals_ = self.forward_inr(c_z.reshape(1, -1, 4), torch.tensor((subj_idx,)))
+                pred_seg_ = pred_seg_.argmax(-1)
+                pred_seg = pred_seg_.reshape(c_z.shape[:-1])
+                pred_seg = pred_seg.cpu().numpy()
+                pred_seg = pred_seg.astype(np.uint8)
+                pred_vals_ = pred_vals_.clip(0.0, 1.0)
+                pred_val = pred_vals_.reshape(c_z.shape[:-1])
+                pred_val = pred_val.cpu().numpy()
+                pred_val = (pred_val*255).astype(np.uint8)
+                z_im_slices.append(pred_val)
+                z_seg_slices.append(pred_seg)
+            pred_im_t = np.concatenate(z_im_slices, 2)
+            pred_seg_t = np.concatenate(z_seg_slices, 2)
+            ims.append(pred_im_t)
+            segs.append(pred_seg_t)
+            break
+        ims = np.stack(ims, -1)
+        segs = np.stack(segs, -1)
+        wandb.log({f"{mode}_volumes/subj_{subj_id}": [wandb.Image(np.concatenate((ims[...,i,0], (segs[...,i,0]/4*255).astype(np.uint8)), 1)) for i in range(50,150,10)]}, step=self.current_epoch)
 
-            pred_vals_ = self.forward_inr(c.reshape(1, -1, 4), torch.tensor((subj_idx,)))
-            pred_vals_ = pred_vals_.clip(0.0, 1.0)
-            pred_val = pred_vals_.reshape(c.shape[:-1])
-            pred_val = pred_val.cpu().numpy()
-            pred_val = (pred_val*255).astype(np.uint8)
-            ims.append(pred_val)
-        wandb.log({f"{mode}_volumes/subj_{subj_id}": [wandb.Image(ims[0][...,i]) for i in range(0,100,10)]}, step=self.current_epoch)
+        if self.current_epoch > 0 and self.current_epoch % (self.logging_rate * 10) == 0:
+            images, _, _, _, _, full_indices, coord_max, coord_min, \
+                aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, 0)
+            aff_params = aff_params_padded[3][None] + self.aff_deform_params[subj_idx][3].cpu()
+            aff = params_to_mat(aff_params, torch.ones_like(spacings_padded[3][None]), flippings_padded[3][None])
+            aff = aff[0].cpu().numpy()
+            v = np.stack(ims, -1)
+            save_dir = Path(f"niftis_vol/{subj_id}")
+            save_dir.parent.mkdir(exist_ok=True)
+            save_dir.mkdir(exist_ok=True)
+            array_to_nifti(str(save_dir / f"{self.current_epoch}_full.nii.gz"), v, aff)
 
-        images, _, full_indices, coord_max, coord_min, \
-            aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, 0)
-        aff_params = aff_params_padded[3][None] + self.aff_deform_params[subj_idx][3].cpu()
-        aff = params_to_mat(aff_params, torch.ones_like(spacings_padded[3][None]), flippings_padded[3][None])
-        aff = aff[0].cpu().numpy()
-        v = np.stack(ims, -1)
-        save_dir = Path(f"niftis_vol/{subj_id}")
-        save_dir.parent.mkdir(exist_ok=True)
-        save_dir.mkdir(exist_ok=True)
-        array_to_nifti(str(save_dir / f"{self.current_epoch}_full.nii.gz"), v, aff)
+    def log_val_point_cloud(self, subj_idx: int, draw_seg: bool = True,
+                            seg_dist_thresh: float = 0.15, coord_split: int = 500): #TODO
+        # Log cloud point
+        batch = self.trainer.datamodule.val_dset.generate_item(subj_idx, 1.0, frame=0)
+        coords_voxel, values, aff_params, spacings, needs_flip, _, slice_idx, min_coords, max_coords, segs = batch
+        coords_voxel = coords_voxel.cuda()[None]
+        values = values.cuda()
+        aff_params = aff_params.cuda()[None]
+        spacings = spacings.cuda()[None]
+        needs_flip = needs_flip.cuda()[None]
+        slice_idx = slice_idx.cuda()[None]
+        min_coords = min_coords.cuda()[None]
+        max_coords = max_coords.cuda()[None]
+        segs = segs.cuda()
+        world_coords = self.forward_coord_model(coords_voxel, aff_params, torch.zeros_like(aff_params),
+                                                spacings, needs_flip, slice_idx, min_coords, max_coords)
+        del min_coords, max_coords, slice_idx, needs_flip, spacings, aff_params
+        world_coords = world_coords[0, ..., :-1]
+        values = (values.clamp(min=0.0, max=1.0) * 255)
 
+        selection = []
+        for i in tqdm(range(0, coord_split), desc=f"Processing cloud point for subject {subj_idx}"):
+            idx1 = world_coords.shape[0] * i // coord_split
+            idx2 = world_coords.shape[0] * (i + 1) // coord_split
+            s = compute_neighbourhood_matrix(world_coords[idx1:idx2], world_coords[segs.any(dim=-1)],
+                                             dist_thresh=seg_dist_thresh)
+            selection.append(s)
+        del s
+        selection = torch.cat(selection, dim=0)
+        # selection = torch.logical_and(selection, values[..., 0] > 70)
+        values = torch.stack([values[selection, 0]] * 3, dim=-1)
+        if draw_seg:
+            segs = torch.stack([segs[selection, 0]] * 3, dim=-1)
+            values = torch.where(segs == 1, torch.tensor((255, 0, 0)).cuda(), values)
+            values = torch.where(segs == 2, torch.tensor((0, 255, 0)).cuda(), values)
+            values = torch.where(segs == 3, torch.tensor((0, 255, 255)).cuda(), values)
+
+        cloud_point = torch.cat([world_coords[selection], values], dim=-1).detach().cpu().numpy()
+        wandb.log({f"validation/img_cloud_{subj_idx}": wandb.Object3D(cloud_point)})
+        del selection, cloud_point
 
 @dataclass
 class Params:
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    num_coords: int = 50_000
+    num_coords: int = 20_000
     batch_size: int = 4
     check_val_every_n_epoch: int = 1000000000
-    logging_rate: int = 200
+    logging_rate: int = 1000
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     enc_num_hidden_layers: int = 4
@@ -393,6 +547,10 @@ class Params:
     weight_reg_lat: float = 1e-4
     weight_reg_deform: float = 0e-2
     weight_reg_deform_lat: float = 1e-2
+    weight_loss_deriv: float = 1e0
+    weight_loss_hess: float = 1e0
+    weight_loss_seg: float = 1e0
+    weight_seg_class: Tuple[float] = (1,4,8,4)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-5
@@ -416,7 +574,7 @@ def main(data_dir, wandb_disabled="false"):
     params = Params()
     logger.log_hyperparams(params.__dict__)
     data_module = CMRDataModule(load_la_dir=data_dir, load_sa_dir=data_dir,
-                                preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/aligned_h5",
+                                preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_newdn",
                                 batch_size=params.batch_size, num_coords=params.num_coords, num_workers=0)
     data_module.setup(stage="fit")
 
@@ -446,4 +604,4 @@ def main(data_dir, wandb_disabled="false"):
 
 
 if __name__ == '__main__':
-    main(r"/home/nil/data/ukbb/cardiac/aligned_subjects")
+    main(r"/home/nil/data/ukbb/cardiac/unaligned_subjects")

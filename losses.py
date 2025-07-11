@@ -1,10 +1,27 @@
+import math
 from typing import Optional
 
 import monai.metrics
 import torch
 from torch import nn
+import torch.nn.functional as F
 from monai.losses import DiceLoss, GeneralizedDiceLoss
 from monai.metrics import PSNRMetric, SSIMMetric, DiceMetric, HausdorffDistanceMetric
+
+
+class PSNRLoss(nn.Module):
+    def __init__(self, max_pixel_value=1.0):
+        super(PSNRLoss, self).__init__()
+        self.max_pixel_value = max_pixel_value
+        self.log_max_20 = 20 * math.log10(self.max_pixel_value)
+
+    def forward(self, pred, target, eps=1e-6):
+        mse = F.mse_loss(pred, target, reduction='mean')
+        if mse == 0.0:
+            return torch.tensor(0.0, device=pred.device)
+        psnr = self.log_max_20 - 1 * torch.log10(mse + eps)
+        # To use as a loss, we minimize negative PSNR
+        return -psnr
 
 
 class SegmentationCriterion(nn.Module):

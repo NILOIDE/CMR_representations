@@ -1,4 +1,5 @@
-from typing import Tuple
+import math
+from typing import Tuple, List, Optional
 
 import numpy as np
 import torch
@@ -51,6 +52,19 @@ def plane_intersection(a: torch.Tensor, b: torch.Tensor):
     return line
 
 
+def plane_line_intersection(p0, p1, plane, epsilon=1e-6):
+    """ Adapted from https://stackoverflow.com/questions/5666222/3d-line-plane-intersection """
+    u = (p1 - p0)
+    tdenom = plane[:3] @ u
+    if abs(tdenom) < epsilon:
+        raise ValueError("Line is parallel to plane.")
+
+    tnumer = plane[:3] @ p0 + plane[3]
+    t = -tnumer / tdenom
+    out = p0 + t * u
+    return out
+
+
 def closest_point_on_line(line: torch.Tensor, point: torch.Tensor) -> torch.Tensor:
     # https://blender.stackexchange.com/questions/94464/finding-the-closest-point-on-a-line-defined-by-two-points
     assert len(line.shape) == 3
@@ -66,3 +80,94 @@ def closest_point_on_line(line: torch.Tensor, point: torch.Tensor) -> torch.Tens
     # Projected point is start of line plus (distance * direction)
     projected_point = line[:, 0] + dist_along_line[:, None].tile((1, 3)) * direction_line_n
     return projected_point
+
+
+def get_image_plane_from_affine(affines):
+    points_voxel_space = torch.tensor([[0., 0., 0., 1.],
+                                       [1., 0., 0., 1.],
+                                       [0., 1., 0., 1.]
+                                       ], dtype=affines.dtype, device=affines.device)
+    points_voxel_space = torch.tile(points_voxel_space, (affines.shape[0], 1))
+    affines_ = torch.repeat_interleave(affines, 3, dim=0)
+    points_scanner_space = torch.einsum("ijk,ik->ij", [affines_, points_voxel_space]).reshape(affines.shape[0], 3, -1)
+    return get_image_plane(points_scanner_space)
+
+
+def rotation_matrix(theta, axis):
+    """
+    Return the rotation matrix associated with counterclockwise rotation about
+    the given axis by theta radians.
+    """
+    axis = np.asarray(axis)
+    axis = axis / math.sqrt(np.dot(axis, axis))
+    a = math.cos(theta / 2.0)
+    b, c, d = -axis * math.sin(theta / 2.0)
+    aa, bb, cc, dd = a * a, b * b, c * c, d * d
+    bc, ad, ac, ab, bd, cd = b * c, a * d, a * c, a * b, b * d, c * d
+    return torch.tensor([[aa + bb - cc - dd, 2 * (bc + ad), 2 * (bd - ac)],
+                         [2 * (bc - ad), aa + cc - bb - dd, 2 * (cd + ab)],
+                         [2 * (bd + ac), 2 * (cd - ab), aa + dd - bb - cc]], dtype=torch.float32)
+
+
+def normalize_plane_orientations(affines: List[torch.Tensor], segs: Optional[List[torch.Tensor]] = None) -> List[torch.Tensor]:
+    """ We find landmarks in ED frame, first 3 slices are LA slices """
+    ED_frame = 0
+    if segs is not None:
+        # If no segmentations provided, we work with top-most and bottom-most SA slices
+        lv_basal_slice = 3
+        lv_apex_slice = len(affines)-1
+    else:
+        # Iterate from base to apex until we find a LV_pool segmentation
+        lv_basal_slice = None
+        for i in range(len(segs)):
+            s = segs[3+i][ED_frame]
+            if (s == 1).any():
+                lv_basal_slice = 3+i
+                break
+            if i > 3:
+                raise ValueError("Heart base is weirdly low!")
+        # Iterate from apex to base until we find a LV_pool segmentation
+        lv_apex_slice = None
+        for i in range(len(segs)-1, 3, -1):
+            s = segs[i][ED_frame]
+            if (s == 1).any():
+                lv_apex_slice = i
+                break
+            if i < len(segs) - 3:
+                raise ValueError("Heart apex is weirdly high!")
+        # Define landmark coordinates
+        base_seg_thresh = 200  # TODO: Check thresh param is ok
+        if torch.sum(segs[lv_basal_slice][ED_frame] == 1) < base_seg_thresh:
+            # We do +1 because basal slice is not always properly segmented
+            lv_basal_slice = lv_basal_slice + 1
+    # Find LA vector and where it intersects with middle SA slice
+    lv_midventr_slice = (lv_apex_slice + lv_basal_slice) // 2
+    plane_equations = get_image_plane_from_affine(torch.stack(affines))
+    la_vector_points = plane_intersection(plane_equations[2][None], plane_equations[0][None])[0]
+    la_vector = la_vector_points[1] - la_vector_points[0]
+    lv_rv_vector_points = plane_intersection(plane_equations[2][None], plane_equations[lv_midventr_slice][None])[0]
+    lv_rv_vector = lv_rv_vector_points[1] - lv_rv_vector_points[0]
+    w_lv_midway_center = plane_line_intersection(la_vector_points[1], la_vector_points[0], plane_equations[lv_midventr_slice])
+
+    # Calculate affine matrix that aligns LA vector with z axis
+    z_vector = torch.tensor((0, 0, 1), dtype=la_vector.dtype)
+    la_to_z_angle = torch.arccos(torch.dot(la_vector, z_vector) / la_vector.norm())  # the angle to z axis
+    la_rot_axis = torch.cross(z_vector, la_vector)
+    rot_la = rotation_matrix(la_to_z_angle, la_rot_axis)
+
+    # Calculate affine matrix that aligns LV-RV vector with y axis
+    y_vector = torch.tensor((0, 1, 0), dtype=lv_rv_vector.dtype)
+    rv_la_cross_vector = torch.cross(la_vector, lv_rv_vector) @ rot_la
+    la_to_y_angle = torch.arccos(np.dot(rv_la_cross_vector, y_vector) / rv_la_cross_vector.norm())  # the angle to y axis
+    rot_rv = rotation_matrix(la_to_y_angle, z_vector)
+
+    # Join rotation matrices and translate to origin
+    rot = rot_la @ rot_rv
+    translation = w_lv_midway_center @ rot
+    normalization_aff = torch.eye(4, dtype=la_vector.dtype)
+    normalization_aff[:3, :3] = rot
+    normalization_aff[3, :3] = -translation
+
+    oriented_affines = [aff.T @ normalization_aff for aff in affines]
+    # To map coords to world space you should left-multiply: coord @ aff
+    return oriented_affines

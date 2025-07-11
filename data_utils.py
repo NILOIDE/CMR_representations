@@ -38,10 +38,11 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> Tupl
     assert seg_sax_path.exists()
     assert seg_sax_path.is_file()
     subject_save_dir = Path(save_dir)
+    subject_save_dir.parent.parent.mkdir(exist_ok=True)
     subject_save_dir.parent.mkdir(exist_ok=True)
     subject_save_dir.mkdir(exist_ok=True)
 
-    # If we assume the files have been processed correectly in the past, we can skip the process
+    # If we assume the files have been processed correctly in the past, we can skip the process
     if skip_exist:
         files = [str(i) for i in subject_save_dir.iterdir() if i.is_file() and str(i.name)[:3] != "seg" and str(i.name)[-7:] == ".nii.gz"]
         seg_files = [str(i) for i in subject_save_dir.iterdir() if i.is_file() and str(i.name)[:3] == "seg" and str(i.name)[-7:] == ".nii.gz"]
@@ -71,19 +72,19 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> Tupl
         # Calculate the distance in scanner space of this slice from volume's origin
         dist_from_vol_origin = sax_aff @ slice_origin - scanner_origin
 
-        # The last column of the affine matrix is the inficates the displacement of the volume from the scanner origin
+        # The last column of the affine matrix is the indicates the displacement of the volume from the scanner origin
         # Adding the volume_origin -> slice_origin distance to the affine's offset gives us the slice's affine
         slice_affine = sax_aff.copy()
         slice_affine[:3, 3] += dist_from_vol_origin[:3]
 
         # Save this image slice individually
         slice_nii = nib.Nifti1Image(sax_im[:, :, slice_idx:slice_idx+1, :], slice_affine)
-        slice_path = str(subject_save_dir / f"sa_{slice_idx}-{sax_im.shape[2]}.nii.gz")
+        slice_path = str(subject_save_dir / f"sa_{str(slice_idx).zfill(2)}-{str(sax_im.shape[2]).zfill(2)}.nii.gz")
         nib.save(slice_nii, slice_path)
 
         # Save this segmentation slice individually
         seg_slice_nii = nib.Nifti1Image(seg_sax_im[:, :, slice_idx:slice_idx+1, :], slice_affine)
-        seg_slice_path = str(subject_save_dir / f"seg_sa_{slice_idx}-{sax_im.shape[2]}.nii.gz")
+        seg_slice_path = str(subject_save_dir / f"seg_sa_{str(slice_idx).zfill(2)}-{str(sax_im.shape[2]).zfill(2)}.nii.gz")
         nib.save(seg_slice_nii, seg_slice_path)
 
         slice_files.append(slice_path)
@@ -92,9 +93,9 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> Tupl
     return slice_files, seg_slice_files
 
 
-def find_subjects(dataset_dir: str, sax_slice_dataset_dir: str) -> List[SubjectFiles]:
+def find_subjects(dataset_dir: str, prepr_dir: str) -> List[SubjectFiles]:
     dataset_dir = Path(dataset_dir)
-    sax_slice_dataset_dir = Path(sax_slice_dataset_dir)
+    prepr_dir = Path(prepr_dir)
     assert dataset_dir.is_dir()
     subject_list = []
     for subj_dir in tqdm(list(dataset_dir.iterdir()), desc="Iterating over subject directory"):
@@ -103,30 +104,42 @@ def find_subjects(dataset_dir: str, sax_slice_dataset_dir: str) -> List[SubjectF
             continue
         if (subj_dir / "sa_slices").exists():
             shutil.rmtree(str(subj_dir / "sa_slices"))
+        prepr_sub_dir = prepr_dir / subj_dir.name
+        prepr_dir.mkdir(exist_ok=True)
         try:
-            sax_slices, seg_sax_slices = split_sax_into_slices(str(sa_file), save_dir=str(sax_slice_dataset_dir / subj_dir.name / "sa_slices"))
+            sax_slices, seg_sax_slices = split_sax_into_slices(str(sa_file), save_dir=str(prepr_sub_dir / "sa_slices"))
         except Exception as e:
             continue
         la4ch = subj_dir / "la_4ch.nii.gz"
         if not la4ch.exists() or not la4ch.is_file() or la4ch.stat().st_size == 0:
             continue
+        la4ch_prep = prepr_sub_dir / "la_4ch.nii.gz"
+        if not la4ch_prep.exists() or not la4ch_prep.is_file() or la4ch_prep.stat().st_size == 0:
+            shutil.copy(str(la4ch), str(la4ch_prep))
         la3ch = subj_dir / "la_3ch.nii.gz"
         if not la3ch.exists() or not la3ch.is_file() or la3ch.stat().st_size == 0:
             continue
+        la3ch_prep = prepr_sub_dir / "la_3ch.nii.gz"
+        if not la3ch_prep.exists() or not la3ch_prep.is_file() or la3ch_prep.stat().st_size == 0:
+            shutil.copy(str(la3ch), str(la3ch_prep))
         la2ch = subj_dir / "la_2ch.nii.gz"
         if not la2ch.exists() or not la2ch.is_file() or la2ch.stat().st_size == 0:
             continue
-        seg_la4ch = subj_dir / "seg_la_4ch.nii.gz"
-        if not seg_la4ch.exists() or not seg_la4ch.is_file() or seg_la4ch.stat().st_size == 0:
-            continue
-        seg_la3ch = subj_dir / "seg_la_3ch.nii.gz"
-        # if not seg_la3ch.exists() or not seg_la3ch.is_file() or seg_la3ch.stat().st_size == 0:
-        #     continue
-        seg_la2ch = subj_dir / "seg_la_2ch.nii.gz"
-        if not seg_la2ch.exists() or not seg_la2ch.is_file() or seg_la2ch.stat().st_size == 0:
-            continue
+        la2ch_prep = prepr_sub_dir / "la_2ch.nii.gz"
+        if not la2ch_prep.exists() or not la2ch_prep.is_file() or la2ch_prep.stat().st_size == 0:
+            shutil.copy(str(la2ch), str(la2ch_prep))
 
-        subj_files = SubjectFiles(name=subj_dir.name, sax=sax_slices, la4ch=str(la4ch), la3ch=str(la3ch), la2ch=str(la2ch), sax_seg=seg_sax_slices, la4ch_seg=str(seg_la4ch), la3ch_seg=str(seg_la3ch), la2ch_seg=str(seg_la2ch))
+        # seg_la4ch = subj_dir / "seg_la_4ch.nii.gz"
+        # if not seg_la4ch.exists() or not seg_la4ch.is_file() or seg_la4ch.stat().st_size == 0:
+        #     continue
+        # seg_la3ch = subj_dir / "seg_la_3ch.nii.gz"
+        # # if not seg_la3ch.exists() or not seg_la3ch.is_file() or seg_la3ch.stat().st_size == 0:
+        # #     continue
+        # seg_la2ch = subj_dir / "seg_la_2ch.nii.gz"
+        # if not seg_la2ch.exists() or not seg_la2ch.is_file() or seg_la2ch.stat().st_size == 0:
+        #     continue
+
+        subj_files = SubjectFiles(name=subj_dir.name, sax=sax_slices, la4ch=str(la4ch), la3ch=str(la3ch), la2ch=str(la2ch), sax_seg=seg_sax_slices, la4ch_seg=None, la3ch_seg=None, la2ch_seg=None)
         subject_list.append(subj_files)
     return subject_list
 
@@ -317,12 +330,12 @@ def download_substring_matching_subjects(keys: List[str],
 
 
 if __name__ == '__main__':
-    os.environ["KMP_DUPLICATE_LIB_OK"] = "1"
-    remote_subj_dir = "/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/"
-    download_dir = "/home/pti/Documents/datasets/UKBB_subjects/"
-    password = input("Password:")
-    download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
-    subject_list = find_subjects(download_dir, sax_slice_dataset_dir="/home/pti/Documents/datasets/UKBB_subjects_unaligned")
+    # os.environ["KMP_DUPLICATE_LIB_OK"] = "1"
+    # remote_subj_dir = "/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/"
+    download_dir = "/home/nil/data/ukbb/cardiac/subjects"
+    # password = input("Password:")
+    # download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
+    subject_list = find_subjects(download_dir, prepr_dir="/home/nil/data/ukbb/cardiac/unaligned_subjects")
     print(len(subject_list))
     # ims_, anns_ = [i for i, j, in ann_pairs], [j for i, j, in ann_pairs]
     # print(len(ann_pairs), "SAX subjects")

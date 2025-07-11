@@ -5,7 +5,8 @@ from typing import Optional, Tuple, List, Union
 import numpy as np
 import nibabel as nib
 import torch
-from kornia.filters import spatial_gradient
+import torch.nn.functional as F
+from scipy.ndimage import binary_dilation
 from torch.utils.data import Dataset, DataLoader, random_split
 import lightning.pytorch as pl
 import pickle
@@ -13,18 +14,27 @@ import os
 import h5py
 from tqdm import tqdm
 
-from utils import normalize_image_with_percentile, mat_to_params, make_masked_coordinate_tensor
+from geo_utils import normalize_plane_orientations
+from sa_la_interp import interpolate_sa_segs_to_la
+from utils import normalize_image_with_percentile, mat_to_params, make_masked_coordinate_tensor, \
+    compute_3d_image_gradients, compute_3d_image_hessian, compute_3d_image_hessian, to_1hot, \
+    compute_3d_image_gradients_dim_wise, temporal_median_filter, spatial_median_filter
 
 
 class CMRDataModule(pl.LightningDataModule):
-    def __init__(self, load_la_dir: str = r"D:\UKBB_subjects", load_sa_dir: str = r"D:\UKBB_subjects_unaligned",
-                 preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5", replace_existing_processed=False,
-                 batch_size: int = 32, num_coords: int = 4000, num_workers: int = 0):
+    def __init__(self,
+                 load_la_dir: str,
+                 load_sa_dir: str,
+                 preprocessed_store_path,
+                 replace_existing_processed=False,
+                 batch_size: int = 32,
+                 num_coords: int = 4000,
+                 num_workers: int = 0):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
-        self.replace_existing_processed = False
+        self.replace_existing_processed = replace_existing_processed
         self.batch_size = batch_size
         self.num_coords = num_coords
         self.train_dset = None
@@ -33,16 +43,18 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 1000
-        self.num_val = 10
-        self.num_test = 10
+        self.num_train = 16
+        self.num_val = 1
+        self.num_test = 1
         self.max_slices = -1
         self.num_workers = num_workers
 
     def setup(self, stage: str, pickle_name=None):
         num_subjects = self.num_train + self.num_val + self.num_test
-        pickle_name = f"dataset_paths_{num_subjects}.pkl"
+        pickle_name = f"dataset_paths_{num_subjects}_{Path(self.store_path).name}.pkl"
         try:
+            if self.replace_existing_processed:
+                raise FileNotFoundError
             with open(pickle_name, 'rb') as handle:
                 subject_data, self.max_slices = pickle.load(handle)
         except FileNotFoundError:
@@ -54,7 +66,7 @@ class CMRDataModule(pl.LightningDataModule):
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(subject_data))), split)]
 
-        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs][:12], # TODO
+        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs][:],
                                       num_coords=self.num_coords)
         self.val_dset = CardiacUKBB([subject_data[i] for i in val_idxs],
                                     num_coords=self.num_coords)
@@ -103,7 +115,7 @@ class CMRDataModule(pl.LightningDataModule):
 
             sa_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('sa*.nii.gz')))
             sa_files = [str(x) for x in sa_files]
-            if len(la_files) != 3 or not sa_files:
+            if len(la_files) != 3 or len(sa_files) < 5:
                 continue
 
             # Segmentations
@@ -132,7 +144,7 @@ class CMRDataModule(pl.LightningDataModule):
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
         prepr_data_paths = []
-        for subj_slices in tqdm(subj_paths, desc="Preprocessing subject data into torch tensor."):
+        for subj_slices, subj_seg_slices in tqdm(list(zip(subj_paths, seg_paths)), desc="Preprocessing subject data into torch tensor."):
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / "prep_data.h5"
@@ -141,46 +153,106 @@ class CMRDataModule(pl.LightningDataModule):
                 continue
 
             # Otherwise, preprocess subject
+            images = []
+            image_ds = []
+            image_dds = []
+            segs = []
+            affines = []
+            spacings = []
+            # Iterate backwards so that all SA segmentations are loaded by the time we tackle LA
+            for idx, slice_path in enumerate(subj_slices):
+                # Load image
+                nib_subj = nib.load(slice_path)
+                img = nib_subj.get_fdata().squeeze()
+                img = torch.from_numpy(normalize_image_with_percentile(img))
+                img = temporal_median_filter(img[None, None], kernel_size=7)[0, 0]
+                img_uint = (img * 255).to(torch.uint8)
+                images.append(img_uint)
+                # Compute image gradients and Hessian
+                img_time_pad = torch.cat((img[...,-1:], img, img[...,:1]), -1)
+                img_d = compute_3d_image_gradients(img_time_pad[None, None])[0,...,1:-1]
+                img_d_time_pad = torch.cat((img_d[...,-1:], img_d, img_d[...,:1]), -1)
+                img_dd_x = compute_3d_image_gradients(img_d_time_pad[None,0:1])[0,...,1:-1]
+                img_dd_y = compute_3d_image_gradients(img_d_time_pad[None,1:2])[0,...,1:-1]
+                img_dd_t = compute_3d_image_gradients(img_d_time_pad[None,2:3])[0,...,1:-1]
+                img_dd = torch.cat((img_dd_x[0:3], img_dd_y[1:3], img_dd_t[2:3]), 0)  # (dxx, dxy, dxz, dyy, dyz, dzz)
+                img_d = img_d.moveaxis(0, -1)
+                img_dd = img_dd.moveaxis(0, -1)
+                image_ds.append(img_d)
+                image_dds.append(img_dd)
+
+                # Decompose affines into its rotation and translation params
+                aff = torch.tensor(nib_subj.affine, dtype=torch.float32)
+                affines.append(aff)
+                spacing = torch.tensor(nib_subj.header.get_zooms()[:3], dtype=aff.dtype)
+                spacings.append(spacing)
+                # Get segmentation for SA (when idx>=3), or zero mask for LA (when idx<3)
+                if idx >= 3:
+                    nib_subj_seg = nib.load(subj_seg_slices[idx-3])
+                    seg = nib_subj_seg.get_fdata().squeeze()
+                    seg = torch.from_numpy(seg)
+                else:
+                    seg = torch.zeros(img.shape, dtype=torch.uint8)
+                segs.append(seg)
+
+            # Normalize orientation of planes and store the 6 aff params
+            # affines = normalize_plane_orientations(affines, segs)
+            flippings = []
+            aff_params = []
             coord_max = []
             coord_min = []
-            images = []
-            segs = []
-            aff_params = []
-            spacings = []
-            flippings = []
-            for idx, slice_path in enumerate(subj_slices):
-                nib_subj = nib.load(slice_path)
-                img = nib_subj.get_fdata()
-                img = torch.from_numpy(normalize_image_with_percentile(img)).to(torch.float32)
-                images.append(img)
+            for aff, img, spac in zip(affines, images, spacings):
+                needs_flip = torch.linalg.det(aff[:3, :3]) <= 0
+                flippings.append(needs_flip)
+                aff_p = mat_to_params(aff[None], spac[None], needs_flip[None]).squeeze(0)
+                aff_params.append(aff_p)
+
                 # Find min and max coordinates of slice
-                aff = nib_subj.affine
                 (x, y) = img.shape[:2]
                 meshgrid = np.meshgrid(np.arange(0, x), np.arange(0, y), np.array([0]), indexing="ij")
                 coordinates_arr_mesh = np.stack(meshgrid, axis=-1).reshape(-1, 3)
-                w_coordinates = nib.affines.apply_affine(aff, coordinates_arr_mesh)
+                w_coordinates = nib.affines.apply_affine(aff.numpy(), coordinates_arr_mesh)
                 # world coordinates
                 coordinates_arr = torch.tensor(w_coordinates, dtype=torch.float32)
                 coord_max.append(torch.amax(coordinates_arr, dim=0))
                 coord_min.append(torch.amin(coordinates_arr, dim=0))
 
-                # Decompose affines into its rotation and translation params
-                aff = torch.tensor(aff, dtype=torch.float32)
-                spacing = torch.tensor(nib_subj.header.get_zooms()[:3], dtype=aff.dtype)
-                needs_flip = torch.linalg.det(aff[:3, :3]) <= 0
-                params = mat_to_params(aff[None], spacing[None], needs_flip[None])
-                aff_params.append(params[0])
-                spacings.append(spacing)
-                flippings.append(needs_flip)
+            # Because we don't have LA seg, we want to label which points are far enough
+            # from foreground to confidently supervise as background
+            la_gt_available_masks = []
+            for idx, (img, aff) in enumerate(zip(images[:3], affines[:3])):
+                la_seg_interp, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
+                                                             [i.numpy() for i in images[3:]],
+                                                             [i.numpy() for i in affines[3:]],
+                                                             target_shape=(img.shape[0], img.shape[1], img.shape[-1]),
+                                                             target_aff=aff.numpy(),
+                                                             frames=None,
+                                                             oob_dist_thresh=10.)
+                la_fg = la_seg_interp > 0
+                la_fg_dil = np.moveaxis(binary_dilation(np.moveaxis(la_fg, -1, 0), iterations=5), 0, -1)
+                la_gt_bg = ~la_fg_dil
+                la_gt_bg = torch.from_numpy(la_gt_bg)
+                la_gt_available_masks.append(la_gt_bg)
 
-            # Place all subject slices into one combined volume (slices, height_max, width_max)
+            # Place all subject slices into one combined slice stack (slices, height_max, width_max, time)
             dim_max = torch.amax(torch.tensor([i.shape[:2] for i in images]), dim=0)
-            im_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]))
+            im_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]), dtype=torch.uint8)
             im_pad_mask = torch.zeros_like(im_pad, dtype=torch.bool)
             for i, im in enumerate(images):
-                im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze(2)
+                im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze()
                 im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
-            non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
+            # non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
+            img_d_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1], 3), dtype=torch.float32)
+            img_dd_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1], 6), dtype=torch.float32)
+            for i, (d, dd) in enumerate(zip(image_ds, image_dds)):
+                img_d_pad[i, :d.shape[0], :d.shape[1]] = d.squeeze()
+                img_dd_pad[i, :dd.shape[0], :dd.shape[1]] = dd.squeeze()
+            seg_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]), dtype=torch.uint8)
+            for i, seg in enumerate(segs):
+                seg_pad[i, :seg.shape[0], :seg.shape[1]] = seg.squeeze()
+            gt_available_pad = torch.zeros((len(la_gt_available_masks), *dim_max, images[-1].shape[-1]), dtype=torch.bool)
+            for i, a in enumerate(la_gt_available_masks):
+                gt_available_pad[i, :a.shape[0], :a.shape[1]] = a.squeeze()
 
             # Get max and min coordinates across subject's slices
             subj_coord_max = torch.concatenate((torch.amax(torch.stack(coord_max, dim=0), dim=0), torch.tensor([50])))
@@ -205,21 +277,22 @@ class CMRDataModule(pl.LightningDataModule):
                 os.remove(str(pkl_path))
             if save_path.parent.exists() and replace_existing:
                 shutil.rmtree(str(save_path.parent))
+            save_path.parent.parent.mkdir(exist_ok=True)
             save_path.parent.mkdir(exist_ok=True)
             while not save_path.exists() or save_path.stat().st_size < 100:
                 with h5py.File(save_path, 'w') as f:
-                    im_pad = im_pad * 255
-                    atlas_pad = im_pad.mean(-1)
                     f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
-                    f.create_dataset('atlas_padded', data=atlas_pad.numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
                     f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
+                    f.create_dataset('image_d_padded', data=img_d_pad.moveaxis(-1, 0).moveaxis(-1, 0).numpy(), dtype=np.float32, compression=1)  # Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
+                    f.create_dataset('image_dd_padded', data=img_dd_pad.moveaxis(-1, 0).moveaxis(-1, 0).numpy(), dtype=np.float32, compression=1)  # Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
+                    f.create_dataset('seg_padded', data=seg_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)
+                    f.create_dataset('gt_available_padded', data=gt_available_pad.moveaxis(-1, 0).numpy(), compression=1)
                     f.create_dataset('coord_max', data=subj_coord_max.numpy(), compression=1)
                     f.create_dataset('coord_min', data=subj_coord_min.numpy(), compression=1)
                     f.create_dataset('aff_params_padded', data=aff_params_padded.numpy(), compression=1)
                     f.create_dataset('spacings_padded', data=spacings_padded.numpy(), compression=1)
                     f.create_dataset('flippings_padded', data=needs_flip_padded.numpy(), compression=1)
             prepr_data_paths.append(str(save_path))
-
         return prepr_data_paths
 
 
@@ -238,7 +311,7 @@ class CardiacUKBB(Dataset):
         return len(self.data_paths)
 
     def load_subject_data(self, subj_idx: int, frame_idx: Optional[int] = None, **kwargs) \
-            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            -> Tuple[torch.Tensor, ...]:
         """Load image and segmentation files and undersample them according to hold-out rates.
         :param subj_idx: Index of subject in dataset list.
         """
@@ -250,11 +323,14 @@ class CardiacUKBB(Dataset):
         with h5py.File(self.data_paths[subj_idx], 'r') as f:
             # Load only the randomly selected image frame from the (time, slices, H, W) volume
             image = torch.tensor(f['image_padded'][selected_frame], dtype=torch.float32) / 255.
-            image_tp1 = torch.tensor(f['image_padded'][(selected_frame+1)%50], dtype=torch.float32) / 255.
-            image_dt = image_tp1 - image
-            # atlas = torch.tensor(f['atlas_padded'], dtype=torch.float32) / 255.
+            image_dt = torch.tensor(f['image_d_padded'][selected_frame, 2:3], dtype=torch.float32).moveaxis(0, -1)
+            # image_dt = torch.cat((image_dt[..., :2], torch.zeros_like(image_dt[..., -1:]), image_dt[..., -1:]), -1)
+            image_ddt = torch.tensor(f['image_dd_padded'][selected_frame, 5:6], dtype=torch.float32).moveaxis(0, -1)
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
+            seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
+            la_gt_available = torch.ones(image.shape, dtype=torch.bool)
+            la_gt_available[:3] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
             non_padding_indices = make_masked_coordinate_tensor(image_mask)
             # Add the time index to get the full volume index
@@ -265,10 +341,10 @@ class CardiacUKBB(Dataset):
             coord_max = torch.tensor(f['coord_max'][:], dtype=torch.float32)
             coord_min = torch.tensor(f['coord_min'][:], dtype=torch.float32)
             # Load in affine-related data
-            aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32)
+            aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32).squeeze(-2)
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
-        return image, image_dt, full_indices, coord_min, coord_max, \
+        return image, image_dt, image_ddt, seg, la_gt_available, full_indices, coord_min, coord_max, \
             aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
@@ -276,7 +352,7 @@ class CardiacUKBB(Dataset):
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        img, img_dt, non_padding_indices, min_coords, max_coords, \
+        img, img_dt, img_ddt, seg, gt_avail, non_padding_indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
 
         # img_d = spatial_gradient(img[:, None], mode="diff", order=1, normalized=False).abs().sum((1,2))
@@ -297,14 +373,19 @@ class CardiacUKBB(Dataset):
         # Get image values at the indices samples
         image_values_sample = img[tuple(indices.T[:-1])]
         image_dt_values_sample = img_dt[tuple(indices.T[:-1])]
+        image_ddt_values_sample = img_ddt[tuple(indices.T[:-1])]
+        seg_sample = seg[tuple(indices.T[:-1])]
+        seg_sample = to_1hot(seg_sample, num_class=4)
+        gt_avail_sample = gt_avail[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = np.concatenate((indices[:, 1:-1], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         sub_idx = torch.tensor(idx, dtype=torch.long)
-        return voxel_indices, image_values_sample, image_dt_values_sample, aff_params_padded, spacings_padded, needs_flip_padded, \
-            sub_idx, slice_indices, min_coords, max_coords
+        return (voxel_indices, image_values_sample, image_dt_values_sample, image_ddt_values_sample,
+                seg_sample, gt_avail_sample, aff_params_padded, spacings_padded, needs_flip_padded,
+                sub_idx, slice_indices, min_coords, max_coords)
 
 
 class CardiacUKBBValidation(CardiacUKBB):
