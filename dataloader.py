@@ -14,11 +14,11 @@ import os
 import h5py
 from tqdm import tqdm
 
-from geo_utils import normalize_plane_orientations
+from geo_utils import normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, make_masked_coordinate_tensor, \
     compute_3d_image_gradients, compute_3d_image_hessian, compute_3d_image_hessian, to_1hot, \
-    compute_3d_image_gradients_dim_wise, temporal_median_filter, spatial_median_filter
+    compute_3d_image_gradients_dim_wise, temporal_median_filter, spatial_median_filter, nlm_denoise_multi, to_gif
 
 
 class CMRDataModule(pl.LightningDataModule):
@@ -26,7 +26,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path,
-                 replace_existing_processed=False,
+                 replace_existing_processed=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
                  num_workers: int = 0):
@@ -87,7 +87,10 @@ class CMRDataModule(pl.LightningDataModule):
         return self.train_dset.coord_size
 
     def get_max_slices(self) -> int:
-        return self.max_slices
+        dset = self.train_dset if self.train_dset else self.test_dset
+        with h5py.File(dset[0], 'r') as f:
+            shape = f['image_padded'].shape
+        return shape[1]
 
     def train_dataloader(self):
         return self._train_dataloader
@@ -165,16 +168,14 @@ class CMRDataModule(pl.LightningDataModule):
                 nib_subj = nib.load(slice_path)
                 img = nib_subj.get_fdata().squeeze()
                 img = torch.from_numpy(normalize_image_with_percentile(img))
-                img = temporal_median_filter(img[None, None], kernel_size=7)[0, 0]
-                img_uint = (img * 255).to(torch.uint8)
+                # img = nlm_denoise_multi(img, 49, 1, template_window_size=5,search_window_size=21)
+                img_uint = (img * 255).round().to(torch.uint8)
                 images.append(img_uint)
                 # Compute image gradients and Hessian
-                img_time_pad = torch.cat((img[...,-1:], img, img[...,:1]), -1)
-                img_d = compute_3d_image_gradients(img_time_pad[None, None])[0,...,1:-1]
-                img_d_time_pad = torch.cat((img_d[...,-1:], img_d, img_d[...,:1]), -1)
-                img_dd_x = compute_3d_image_gradients(img_d_time_pad[None,0:1])[0,...,1:-1]
-                img_dd_y = compute_3d_image_gradients(img_d_time_pad[None,1:2])[0,...,1:-1]
-                img_dd_t = compute_3d_image_gradients(img_d_time_pad[None,2:3])[0,...,1:-1]
+                img_d = compute_3d_image_gradients(img[None, None])[0]
+                img_dd_x = compute_3d_image_gradients(img_d[None,0:1])[0]
+                img_dd_y = compute_3d_image_gradients(img_d[None,1:2])[0]
+                img_dd_t = compute_3d_image_gradients(img_d[None,2:3])[0]
                 img_dd = torch.cat((img_dd_x[0:3], img_dd_y[1:3], img_dd_t[2:3]), 0)  # (dxx, dxy, dxz, dyy, dyz, dzz)
                 img_d = img_d.moveaxis(0, -1)
                 img_dd = img_dd.moveaxis(0, -1)
@@ -196,7 +197,7 @@ class CMRDataModule(pl.LightningDataModule):
                 segs.append(seg)
 
             # Normalize orientation of planes and store the 6 aff params
-            # affines = normalize_plane_orientations(affines, segs)
+            affines = normalize_slice_orientatfixedion(affines, segs)
             flippings = []
             aff_params = []
             coord_max = []

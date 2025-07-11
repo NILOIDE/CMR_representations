@@ -80,7 +80,7 @@ class INR(pl.LightningModule):
         self.coord_size = coord_size
         self.intensity_size = 1
         self.num_subjects = num_subjects
-        self.max_slices = 16
+        self.max_slices = max_slices
         self.norm_min, self.norm_max = 0.0, 1.0
 
         self.latent_size = kwargs["latent_size"]
@@ -563,7 +563,6 @@ class Params:
 
 def main(data_dir, wandb_disabled="false"):
     os.environ['WANDB_DISABLED'] = wandb_disabled
-    logger = WandbLogger(project="CMR-Align")
 
     # configure accelerator and devices
     accelerator = "gpu"
@@ -571,15 +570,15 @@ def main(data_dir, wandb_disabled="false"):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     params = Params()
-    logger.log_hyperparams(params.__dict__)
     data_module = CMRDataModule(load_la_dir=data_dir, load_sa_dir=data_dir,
                                 preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_newdn",
                                 batch_size=params.batch_size, num_coords=params.num_coords, num_workers=0)
     data_module.setup(stage="fit")
 
-    coord_size = data_module.get_coord_size()
+    logger = WandbLogger(project="CMR-Align")
+    logger.log_hyperparams(params.__dict__)
 
-    model = INR(coord_size=coord_size, num_subjects=data_module.num_train, max_slices=data_module.get_max_slices(), **params.__dict__)
+    model = INR(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train, max_slices=data_module.get_max_slices(), **params.__dict__)
 
     os.makedirs(r'./checkpoints', exist_ok=True)
     checkpoint_callback = ModelCheckpoint(

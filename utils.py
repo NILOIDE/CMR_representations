@@ -1,5 +1,6 @@
 from typing import Union, Optional, Tuple, List, Dict
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -84,7 +85,7 @@ def fast_trilinear_interpolation(input_array: torch.Tensor,
 
 
 def flip_affine(affines, needs_flip):
-    # If the original affine had a determinant is <= 0, it is an umproper affine matrix and it needs to be flipped
+    # If the original affine had a determinant is <= 0, it is an improper affine matrix and it needs to be flipped
     needs_flip = needs_flip[:, None, None].repeat((1, 4, 4))
     flip = torch.eye(3, dtype=affines.dtype, device=affines.device)
     flip[0, 0] = -1
@@ -195,22 +196,30 @@ def compute_neighbourhood_matrix(coords: torch.Tensor, ref_coords: torch.Tensor,
 
 def compute_3d_image_gradients(volume):
     def get_3d_central_diff_kernel(device, dtype):
-        kernel = torch.zeros((3, 1, 3, 3, 3), device=device, dtype=dtype)
-        # Derivative along x (axis 2 -> W dimension)
-        kernel[2, 0, 1, 1, 0] = -0.5
-        kernel[2, 0, 1, 1, 2] = +0.5
-        # Derivative along y (axis 1 -> H dimension)
-        kernel[1, 0, 1, 0, 1] = -0.5
-        kernel[1, 0, 1, 2, 1] = +0.5
-        # Derivative along z (axis 0 -> D dimension)
-        kernel[0, 0, 0, 1, 1] = -0.5
-        kernel[0, 0, 2, 1, 1] = +0.5
+        kernel = torch.zeros((3, 1, 5, 5, 5), device=device, dtype=dtype)
+        # Derivative along x (axis 2 -> W)
+        kernel[2, 0, 2, 2, 0] = -1 / 12
+        kernel[2, 0, 2, 2, 1] = +8 / 12
+        kernel[2, 0, 2, 2, 3] = -8 / 12
+        kernel[2, 0, 2, 2, 4] = +1 / 12
+        # Derivative along y (axis 1 -> H)
+        kernel[1, 0, 2, 0, 2] = -1 / 12
+        kernel[1, 0, 2, 1, 2] = +8 / 12
+        kernel[1, 0, 2, 3, 2] = -8 / 12
+        kernel[1, 0, 2, 4, 2] = +1 / 12
+        # Derivative along z (axis 0 -> D)
+        kernel[0, 0, 0, 2, 2] = -1 / 12
+        kernel[0, 0, 1, 2, 2] = +8 / 12
+        kernel[0, 0, 3, 2, 2] = -8 / 12
+        kernel[0, 0, 4, 2, 2] = +1 / 12
 
-        return kernel
+        return kernel * -1
     # volume: (B, 1, D, H, W)
     device, dtype = volume.device, volume.dtype
+    volume_pad = torch.cat((volume[..., -2:], volume, volume[..., :2]), -1)
+    volume_pad = F.pad(volume_pad, (0,0,2,2,2,2))  # F.pad takes padding sequence backwards
     kernel = get_3d_central_diff_kernel(device, dtype)
-    gradients = F.conv3d(volume, kernel, padding=1)  # Pad to keep size
+    gradients = F.conv3d(volume_pad, kernel, padding=0)  # Pad to keep size
     return gradients # (B, 3, D, H, W)
 
 
@@ -310,3 +319,29 @@ def spatial_median_filter(video, kernel_size=(3, 3, 1)):
     unfolded_ = unfolded.reshape(B, C, H, W, T, -1)
     median = unfolded_.median(dim=-1).values  # (B, C, H, W, T)
     return median
+
+
+def nlm_denoise_multi(frames, temporal_window_size, h, template_window_size=None, search_window_size=None):
+    H, W, T = frames.shape
+    frames_uint8 = (frames*255.).round().clip(0., 255.).to(torch.uint8)
+    frames_uint8 = frames_uint8.numpy()
+    frames_uint8 = [frames_uint8[...,i] for i in range(T)]
+    frames_uint8_pad = frames_uint8[-(temporal_window_size//2):] + frames_uint8 + frames_uint8[:(temporal_window_size//2)]
+    frames_dn = []
+    for i in range(temporal_window_size//2, T+(temporal_window_size//2)):
+        f = cv2.fastNlMeansDenoisingMulti(frames_uint8_pad, i, temporal_window_size, h, template_window_size, search_window_size)
+        frames_dn.append(f)
+    frames_dn = np.stack(frames_dn, -1)
+    frames_dn = torch.from_numpy(frames_dn).to(torch.float32) / 255.
+    assert frames_dn.shape == (H, W, T)
+    return frames_dn
+
+
+from PIL import Image
+def to_gif(imgs, name="arr"):
+    imgs = imgs.moveaxis(-1, 0)
+    imgs = (imgs*255).round().to(torch.uint8).numpy()
+    imgs = np.stack([imgs]*3, -1)
+    imgs = [Image.fromarray(img) for img in imgs]
+    # duration is the number of milliseconds between frames; this is 40 frames per second
+    imgs[0].save(f"{name}.gif", save_all=True, append_images=imgs[1:], duration=50, loop=0)
