@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, Dict, Optional, List
 
+import kornia
 import numpy as np
 import torch
 import tqdm
@@ -21,7 +22,6 @@ from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from layers import Relu
 from utils import params_to_mat, make_coordinate_tensor, to_1hot
 from lightning.pytorch.loggers import WandbLogger
-from losses import SegmentationCriterion, ReconstructionCriterion, SegmentationMetrics, ReconstructionMetrics, PSNRLoss
 
 
 class MLP(nn.Module):
@@ -118,7 +118,7 @@ class INR(pl.LightningModule):
         self.recon_loss = torch.nn.MSELoss()
         self.class_weight = [i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']]
         self.seg_loss = DiceLoss(softmax=False, reduction="none", weight=self.class_weight)
-        self.psnr_loss = PSNRLoss()
+        self.psnr_loss = kornia.losses.PSNRLoss(max_val=1.0)
 
         self.weight_reg_inr = kwargs["weight_reg_inr"]
         self.weight_reg_aff = kwargs["weight_reg_aff"]
@@ -131,7 +131,6 @@ class INR(pl.LightningModule):
         self.lr = kwargs["learning_rate"]
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
-
 
 
     def configure_optimizers(self):
@@ -323,7 +322,7 @@ class INR(pl.LightningModule):
                        "dice_RV": dice_per_class[3]}, prog_bar=False)
 
     def on_train_epoch_end(self):
-        if self.current_epoch > 0 and (self.current_epoch == 200 or self.current_epoch % self.logging_rate == 0):
+        if self.current_epoch >= 0 and (self.current_epoch == 200 or self.current_epoch % self.logging_rate == 0):
             self.log_images(0)
             self.log_images(1)
             self.log_images(2)
@@ -374,7 +373,7 @@ class INR(pl.LightningModule):
                 pred_img = pred_vals_.reshape(images.shape[2:])
                 pred_img_dt = pred_vals_d_.reshape(*images.shape[2:], pred_vals_d_.shape[-1])[...,-1]
                 pred_img_ddt = pred_vals_dd_.reshape(*images.shape[2:], *pred_vals_dd_.shape[2:])[...,-1]
-                psnr_metric = self.reconstruction_metrics.psnr(pred_img, images[0,s])
+                psnr_metric = kornia.metrics.psnr(pred_img, images[0,s], max_val=1.0)
                 psnrs[s].append(psnr_metric.mean().item())
                 pred = pred_img.clip(0.0, 1.0)
                 pred = (pred * 255).cpu().numpy()
@@ -417,7 +416,7 @@ class INR(pl.LightningModule):
         psnrs = [np.mean(i) for i in psnrs if i]
         psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
         dices = [torch.stack(d, 0).mean(-1).mean(0) for i, d in enumerate(dices) if d]
-        dices_strings = [f"Dice:" + f"{d[1]:.2f},"[1:] + f" {d[2]:.2f},"[1:] + f" {d[3]:.2f}"[1:] if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
+        dices_strings = [f"Dice:" + f"{d[1]:.2f}, "[1:] + f"{d[2]:.2f}, "[1:] + f"{d[3]:.2f}"[1:] if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
         wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)),
                               caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
         wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
