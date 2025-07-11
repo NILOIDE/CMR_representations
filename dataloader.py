@@ -197,7 +197,7 @@ class CMRDataModule(pl.LightningDataModule):
                 segs.append(seg)
 
             # Normalize orientation of planes and store the 6 aff params
-            affines = normalize_slice_orientatfixedion(affines, segs)
+            affines = normalize_slice_orientation(affines, segs)
             flippings = []
             aff_params = []
             coord_max = []
