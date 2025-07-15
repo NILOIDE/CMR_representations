@@ -179,36 +179,38 @@ def normalize_slice_orientation(affines: List[torch.Tensor], segs: Optional[List
     # Combined transformation: post_translate @ rotation_inv @ pre_translate
     normalization_aff = rotation_inv @ translate
     oriented_affines = [normalization_aff @ aff for aff in affines]
+
     if debug:
+        # -------- Logging segmentations as niftis ----------------------------
         assert segs is not None
         la2ch_seg = segs[0]
         if not la2ch_seg.any():
             la2ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in affines[3:]],
-                                                            target_shape=(segs[0].shape[0], segs[0].shape[1], segs[0].shape[-1]),
-                                                            target_aff=affines[0].numpy(),
-                                                            frames=None,
-                                                            oob_dist_thresh=10.)
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in affines[3:]],
+                                                     target_shape=(segs[0].shape[0], segs[0].shape[1], segs[0].shape[-1]),
+                                                     target_aff=affines[0].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
         la3ch_seg = segs[0]
         if not la3ch_seg.any():
             la3ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in affines[3:]],
-                                                            target_shape=(segs[1].shape[0], segs[1].shape[1], segs[1].shape[-1]),
-                                                            target_aff=affines[1].numpy(),
-                                                            frames=None,
-                                                            oob_dist_thresh=10.)
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in affines[3:]],
+                                                     target_shape=(segs[1].shape[0], segs[1].shape[1], segs[1].shape[-1]),
+                                                     target_aff=affines[1].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
         la4ch_seg = segs[0]
         if not la4ch_seg.any():
             la4ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in segs[3:]],
-                                                            [i.numpy() for i in affines[3:]],
-                                                            target_shape=(segs[2].shape[0], segs[2].shape[1], segs[2].shape[-1]),
-                                                            target_aff=affines[2].numpy(),
-                                                            frames=None,
-                                                            oob_dist_thresh=10.)
-        path = Path('alignment_debug')
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in affines[3:]],
+                                                     target_shape=(segs[2].shape[0], segs[2].shape[1], segs[2].shape[-1]),
+                                                     target_aff=affines[2].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
+        path = Path('debug_alignment')
         path.mkdir(exist_ok=True)
         array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], affines[0].numpy())
         array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], affines[1].numpy())

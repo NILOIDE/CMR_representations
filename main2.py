@@ -20,7 +20,8 @@ from data_utils import array_to_nifti
 from dataloader import CMRDataModule
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from layers import Relu
-from utils import params_to_mat, make_coordinate_tensor, to_1hot
+from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
+    process_segmentation_with_marching_cubes
 from lightning.pytorch.loggers import WandbLogger
 
 
@@ -116,8 +117,8 @@ class INR(pl.LightningModule):
                                  out_size=5)
 
         self.recon_loss = torch.nn.MSELoss()
-        self.class_weight = [i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']]
-        self.seg_loss = DiceLoss(softmax=False, reduction="none", weight=self.class_weight)
+        self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
+        self.seg_loss = DiceLoss(softmax=False, reduction="none")
         self.psnr_loss = kornia.losses.PSNRLoss(max_val=1.0)
 
         self.weight_reg_inr = kwargs["weight_reg_inr"]
@@ -135,7 +136,7 @@ class INR(pl.LightningModule):
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
-        opt_aff = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
+        opt_aff = torch.optim.SGD([self.aff_deform_params], lr=self.lr_aff)
         opt_deform = torch.optim.Adam([*self.coord_deform_inr.parameters(), self.deform_latents], lr=self.lr_def)
         # opt_deform = torch.optim.Adam([w for inr in self.coord_deform_inrs.values() for w in inr.weights] +
         #                               [b for inr in self.coord_deform_inrs.values() for b in inr.biases], lr=1e-3)
@@ -300,7 +301,7 @@ class INR(pl.LightningModule):
         seg_pred, segs = torch.softmax(seg_pred, -1)*gt_avail[...,None], segs*gt_avail[...,None]
         loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
         dice_per_class = 1 - loss_seg_per_class
-        loss_seg = loss_seg_per_class.mean() * self.weight_loss_seg
+        loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
         # values_dt_world = self.plane_deriv_to_world(values_dt, aff_params, spacings, needs_flip, subject_idx, slice_idx,
         #                                             min_coords=min_coords, max_coords=max_coords)
         loss_dt = self.psnr_loss(values_pred_d[...,-1:], values_dt*50) * self.weight_loss_deriv
@@ -322,7 +323,7 @@ class INR(pl.LightningModule):
                        "dice_RV": dice_per_class[3]}, prog_bar=False)
 
     def on_train_epoch_end(self):
-        if self.current_epoch >= 0 and (self.current_epoch == 200 or self.current_epoch % self.logging_rate == 0):
+        if self.current_epoch >= 0 and (self.current_epoch in {100, 500} or self.current_epoch % self.logging_rate == 0):
             self.log_images(0)
             self.log_images(1)
             self.log_images(2)
@@ -416,7 +417,7 @@ class INR(pl.LightningModule):
         psnrs = [np.mean(i) for i in psnrs if i]
         psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
         dices = [torch.stack(d, 0).mean(-1).mean(0) for i, d in enumerate(dices) if d]
-        dices_strings = [f"Dice:" + f"{d[1]:.2f}, "[1:] + f"{d[2]:.2f}, "[1:] + f"{d[3]:.2f}"[1:] if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
+        dices_strings = [f"Dice:" + f"{d[1]:.2f}, " + f"{d[2]:.2f}, " + f"{d[3]:.2f}" if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
         wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)),
                               caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
         wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
@@ -441,7 +442,7 @@ class INR(pl.LightningModule):
         dataset = eval(f"self.trainer.datamodule.{mode}_dset")
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
-        coords = torch.stack(torch.meshgrid(*[torch.arange(0, 1., 1/i) for i in res]), dim=-1)
+        coords = torch.stack(torch.meshgrid(*[torch.linspace(self.norm_min+.25, self.norm_max-.25, i) for i in res]), dim=-1)
         ims = []
         segs = []
         for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging volume subj {subj_id}"):
@@ -452,8 +453,7 @@ class INR(pl.LightningModule):
             for z in range(res[-1]):
                 c_z = c[:,:,z:z+1]
                 pred_seg_, pred_vals_ = self.forward_inr(c_z.reshape(1, -1, 4), torch.tensor((subj_idx,)))
-                pred_seg_ = pred_seg_.argmax(-1)
-                pred_seg = pred_seg_.reshape(c_z.shape[:-1])
+                pred_seg = pred_seg_.argmax(-1).reshape(c_z.shape[:-1])
                 pred_seg = pred_seg.cpu().numpy()
                 pred_seg = pred_seg.astype(np.uint8)
                 pred_vals_ = pred_vals_.clip(0.0, 1.0)
@@ -466,63 +466,46 @@ class INR(pl.LightningModule):
             pred_seg_t = np.concatenate(z_seg_slices, 2)
             ims.append(pred_im_t)
             segs.append(pred_seg_t)
-            break
         ims = np.stack(ims, -1)
         segs = np.stack(segs, -1)
-        wandb.log({f"{mode}_volumes/subj_{subj_id}": [wandb.Image(np.concatenate((ims[...,i,0], (segs[...,i,0]/4*255).astype(np.uint8)), 1)) for i in range(50,150,10)]}, step=self.current_epoch)
 
-        if self.current_epoch > 0 and self.current_epoch % (self.logging_rate * 10) == 0:
+        # Log meshes
+        meshes = process_segmentation_with_marching_cubes(segs[..., 0], level=0.5, step_size=1)
+        if not meshes:
+            # Dummy mesh
+            a = np.zeros_like(segs[..., 0])
+            a[5:15,5:15,5:15] = 1
+            a[20:25,20:25,20:25] = 2
+            meshes = process_segmentation_with_marching_cubes(a, level=0.5, step_size=1)
+        plot = create_meshplot_visualization(meshes)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as f:
+            plot.save(f.name)
+            temp_file_path = f.name
+            with open(f.name, 'r') as html_file:
+                html_content = html_file.read()
+        wandb.log({f"{mode}_mesh/subj_{subj_id}": wandb.Html(html_content)})
+        os.unlink(temp_file_path)
+
+        # Save niftis
+        if self.current_epoch >= 0 and self.current_epoch % (self.logging_rate * 10) == 0:
             images, _, _, _, _, full_indices, coord_max, coord_min, \
                 aff_params_padded, spacings_padded, flippings_padded = dataset.load_subject_data(subj_idx, 0)
             aff_params = aff_params_padded[3][None] + self.aff_deform_params[subj_idx][3].cpu()
             aff = params_to_mat(aff_params, torch.ones_like(spacings_padded[3][None]), flippings_padded[3][None])
             aff = aff[0].cpu().numpy()
-            v = np.stack(ims, -1)
             save_dir = Path(f"niftis_vol/{subj_id}")
             save_dir.parent.mkdir(exist_ok=True)
             save_dir.mkdir(exist_ok=True)
-            array_to_nifti(str(save_dir / f"{self.current_epoch}_full.nii.gz"), v, aff)
+            array_to_nifti(str(save_dir / f"{self.current_epoch}_full.nii.gz"), ims, aff)
+            array_to_nifti(str(save_dir / f"{self.current_epoch}_full_seg.nii.gz"), segs, aff)
 
-    def log_val_point_cloud(self, subj_idx: int, draw_seg: bool = True,
-                            seg_dist_thresh: float = 0.15, coord_split: int = 500): #TODO
-        # Log cloud point
-        batch = self.trainer.datamodule.val_dset.generate_item(subj_idx, 1.0, frame=0)
-        coords_voxel, values, aff_params, spacings, needs_flip, _, slice_idx, min_coords, max_coords, segs = batch
-        coords_voxel = coords_voxel.cuda()[None]
-        values = values.cuda()
-        aff_params = aff_params.cuda()[None]
-        spacings = spacings.cuda()[None]
-        needs_flip = needs_flip.cuda()[None]
-        slice_idx = slice_idx.cuda()[None]
-        min_coords = min_coords.cuda()[None]
-        max_coords = max_coords.cuda()[None]
-        segs = segs.cuda()
-        world_coords = self.forward_coord_model(coords_voxel, aff_params, torch.zeros_like(aff_params),
-                                                spacings, needs_flip, slice_idx, min_coords, max_coords)
-        del min_coords, max_coords, slice_idx, needs_flip, spacings, aff_params
-        world_coords = world_coords[0, ..., :-1]
-        values = (values.clamp(min=0.0, max=1.0) * 255)
+            # Log videos
+            content = [np.stack([np.concatenate((ims[...,i,:], (segs[...,i,:]/4*255).astype(np.uint8)), 1)]*3, axis=0)
+                       for i in range(20, res[2]-20, res[2]//10)]
+            videos = [wandb.Video(np.moveaxis(c, -1, 0), fps=max(1, int(50 / video_duration))) for c in content]
+            wandb.log({f"{mode}_volumes/subj_{subj_id}": videos}, step=self.current_epoch)
 
-        selection = []
-        for i in tqdm(range(0, coord_split), desc=f"Processing cloud point for subject {subj_idx}"):
-            idx1 = world_coords.shape[0] * i // coord_split
-            idx2 = world_coords.shape[0] * (i + 1) // coord_split
-            s = compute_neighbourhood_matrix(world_coords[idx1:idx2], world_coords[segs.any(dim=-1)],
-                                             dist_thresh=seg_dist_thresh)
-            selection.append(s)
-        del s
-        selection = torch.cat(selection, dim=0)
-        # selection = torch.logical_and(selection, values[..., 0] > 70)
-        values = torch.stack([values[selection, 0]] * 3, dim=-1)
-        if draw_seg:
-            segs = torch.stack([segs[selection, 0]] * 3, dim=-1)
-            values = torch.where(segs == 1, torch.tensor((255, 0, 0)).cuda(), values)
-            values = torch.where(segs == 2, torch.tensor((0, 255, 0)).cuda(), values)
-            values = torch.where(segs == 3, torch.tensor((0, 255, 255)).cuda(), values)
-
-        cloud_point = torch.cat([world_coords[selection], values], dim=-1).detach().cpu().numpy()
-        wandb.log({f"validation/img_cloud_{subj_idx}": wandb.Object3D(cloud_point)})
-        del selection, cloud_point
 
 @dataclass
 class Params:
@@ -546,22 +529,22 @@ class Params:
     weight_reg_lat: float = 1e-4
     weight_reg_deform: float = 0e-2
     weight_reg_deform_lat: float = 1e-2
-    weight_loss_deriv: float = 1e0
-    weight_loss_hess: float = 1e0
+    weight_loss_deriv: float = 0e0
+    weight_loss_hess: float = 0e0
     weight_loss_seg: float = 1e0
-    weight_seg_class: Tuple[float] = (1,4,8,4)  # Will be normalized
+    weight_seg_class: Tuple[float] = (1,5,15,10)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
-    learning_rate_aff: float = 1e-5
+    learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-5
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: List[int] = (10,10,10, 6,6)
-    pe_anneal_max_iter: int = 5000
+    pe_num_frequencies: List[int] = (8,8,8,5,5)
+    pe_anneal_max_iter: int = 2000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
 
 
-def main(data_dir, wandb_disabled="false"):
+def main(data_dir, wandb_disabled="true"):
     os.environ['WANDB_DISABLED'] = wandb_disabled
 
     # configure accelerator and devices

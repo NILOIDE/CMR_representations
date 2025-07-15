@@ -14,11 +14,11 @@ import os
 import h5py
 from tqdm import tqdm
 
+from data_utils import array_to_nifti
 from geo_utils import normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, make_masked_coordinate_tensor, \
-    compute_3d_image_gradients, compute_3d_image_hessian, compute_3d_image_hessian, to_1hot, \
-    compute_3d_image_gradients_dim_wise, temporal_median_filter, spatial_median_filter, nlm_denoise_multi, to_gif
+    compute_3d_image_gradients, to_1hot, to_gif, nlm_denoise_multi_parallel
 
 
 class CMRDataModule(pl.LightningDataModule):
@@ -26,7 +26,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path,
-                 replace_existing_processed=True,
+                 replace_existing_processed=False,
                  batch_size: int = 32,
                  num_coords: int = 4000,
                  num_workers: int = 0):
@@ -56,11 +56,11 @@ class CMRDataModule(pl.LightningDataModule):
             if self.replace_existing_processed:
                 raise FileNotFoundError
             with open(pickle_name, 'rb') as handle:
-                subject_data, self.max_slices = pickle.load(handle)
+                subject_data = pickle.load(handle)
         except FileNotFoundError:
-            subject_data, self.max_slices = self.find_subjects(max_num=num_subjects)
+            subject_data = self.find_subjects(max_num=num_subjects)
             with open(pickle_name, 'wb') as handle:
-                pickle.dump([subject_data, self.max_slices], handle, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(subject_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
         assert len(subject_data) == num_subjects
 
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
@@ -88,9 +88,13 @@ class CMRDataModule(pl.LightningDataModule):
 
     def get_max_slices(self) -> int:
         dset = self.train_dset if self.train_dset else self.test_dset
-        with h5py.File(dset[0], 'r') as f:
-            shape = f['image_padded'].shape
-        return shape[1]
+        max_slices = -1
+        for p in dset.data_paths:
+            with h5py.File(p, 'r') as f:
+                shape = f['image_padded'].shape
+                if shape[1] > max_slices:
+                    max_slices = shape[1]
+        return max_slices
 
     def train_dataloader(self):
         return self._train_dataloader
@@ -121,7 +125,12 @@ class CMRDataModule(pl.LightningDataModule):
             if len(la_files) != 3 or len(sa_files) < 5:
                 continue
 
-            # Segmentations
+            # Segmentations. LA have hopefully been interpolated before, else None (and will be interpolated).
+            # LA segs are used for training masking.
+            seg_la_files = [Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_la_2ch.nii.gz',
+                            Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_la_3ch.nii.gz',
+                            Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_la_4ch.nii.gz']
+            seg_la_files = [str(x) for x in seg_la_files]
             seg_sa_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('seg_sa*.nii.gz')))
             seg_sa_files = [str(x) for x in seg_sa_files]
             if not seg_sa_files:
@@ -129,7 +138,8 @@ class CMRDataModule(pl.LightningDataModule):
 
             slices = la_files + sa_files
             images.append(slices)
-            segs.append(seg_sa_files)
+            seg_slices = seg_la_files + seg_sa_files
+            segs.append(seg_slices)
             if len(slices) > max_slices:
                 max_slices = len(slices)
             count += 1
@@ -139,10 +149,9 @@ class CMRDataModule(pl.LightningDataModule):
         subject_data_paths = self.preprocess_subject_data(images, segs, max_slices,
                                                           replace_existing=self.replace_existing_processed)
 
-        return subject_data_paths, max_slices
+        return subject_data_paths
 
-    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices,
-                                replace_existing=True):
+    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices, replace_existing=False, debug=False):
         if replace_existing:
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
@@ -160,6 +169,7 @@ class CMRDataModule(pl.LightningDataModule):
             image_ds = []
             image_dds = []
             segs = []
+            la_segs = []
             affines = []
             spacings = []
             # Iterate backwards so that all SA segmentations are loaded by the time we tackle LA
@@ -167,8 +177,8 @@ class CMRDataModule(pl.LightningDataModule):
                 # Load image
                 nib_subj = nib.load(slice_path)
                 img = nib_subj.get_fdata().squeeze()
-                img = torch.from_numpy(normalize_image_with_percentile(img))
-                # img = nlm_denoise_multi(img, 49, 1, template_window_size=5,search_window_size=21)
+                img = torch.from_numpy(normalize_image_with_percentile(img)).to(torch.float32)
+                img = nlm_denoise_multi_parallel(img, 27, 1, template_window_size=3,search_window_size=7, num_processes=16)
                 img_uint = (img * 255).round().to(torch.uint8)
                 images.append(img_uint)
                 # Compute image gradients and Hessian
@@ -181,18 +191,39 @@ class CMRDataModule(pl.LightningDataModule):
                 img_dd = img_dd.moveaxis(0, -1)
                 image_ds.append(img_d)
                 image_dds.append(img_dd)
+                if debug:
+                    a = [torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32),
+                         img,
+                         nlm_denoise_multi_parallel(torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32), 49, 1, template_window_size=3,search_window_size=15, num_processes=16),
+                         nlm_denoise_multi_parallel(torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32), 49, 1, template_window_size=4,search_window_size=7, num_processes=16),
+                         nlm_denoise_multi_parallel(torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32), 49, 1, template_window_size=4,search_window_size=15, num_processes=16),
+                         nlm_denoise_multi_parallel(torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32), 49, 1, template_window_size=5,search_window_size=7, num_processes=16),
+                         nlm_denoise_multi_parallel(torch.from_numpy(normalize_image_with_percentile(nib_subj.get_fdata().squeeze())).to(torch.float32), 49, 1, template_window_size=5,search_window_size=15, num_processes=16),
+                         ]
+                    b = [compute_3d_image_gradients(i[None, None])[0, -1] for i in a]
+                    c = [compute_3d_image_gradients(i[None, None])[0, -1] for i in b]
+                    to_gif(torch.cat((torch.cat(a, 0), torch.cat([i*2 for i in b], 0).abs(), torch.cat([i*2 for i in c], 0).abs()), 1), str(idx))
 
                 # Decompose affines into its rotation and translation params
                 aff = torch.tensor(nib_subj.affine, dtype=torch.float32)
                 affines.append(aff)
                 spacing = torch.tensor(nib_subj.header.get_zooms()[:3], dtype=aff.dtype)
                 spacings.append(spacing)
-                # Get segmentation for SA (when idx>=3), or zero mask for LA (when idx<3)
+                # Get segmentation for SA (when idx>=3)
                 if idx >= 3:
-                    nib_subj_seg = nib.load(subj_seg_slices[idx-3])
+                    nib_subj_seg = nib.load(subj_seg_slices[idx])
                     seg = nib_subj_seg.get_fdata().squeeze()
-                    seg = torch.from_numpy(seg)
+                    seg = torch.from_numpy(seg).to(torch.uint8)
                 else:
+                    # For LA, we don't have GT segmentations. We set seg as zeros.
+                    # We try to load an interpolated segmentation from SA slices to create a training mask.
+                    try:
+                        nib_subj_seg = nib.load(subj_seg_slices[idx])
+                        seg = nib_subj_seg.get_fdata().squeeze().astype(np.uint8)
+                        la_segs.append(seg)
+                    except FileNotFoundError:
+                        # If interpolated SA seg is not found, we set it to None and will be interpolated below.
+                        la_segs.append(None)
                     seg = torch.zeros(img.shape, dtype=torch.uint8)
                 segs.append(seg)
 
@@ -222,13 +253,19 @@ class CMRDataModule(pl.LightningDataModule):
             # from foreground to confidently supervise as background
             la_gt_available_masks = []
             for idx, (img, aff) in enumerate(zip(images[:3], affines[:3])):
-                la_seg_interp, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
-                                                             [i.numpy() for i in images[3:]],
-                                                             [i.numpy() for i in affines[3:]],
-                                                             target_shape=(img.shape[0], img.shape[1], img.shape[-1]),
-                                                             target_aff=aff.numpy(),
-                                                             frames=None,
-                                                             oob_dist_thresh=10.)
+                if la_segs[idx] is None:
+                    # If we couldn't load the interpolated seg earlier,
+                    # we create it and save it so we don't repeat the slow interp process next time
+                    la_seg_interp, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
+                                                                 [i.numpy() for i in images[3:]],
+                                                                 [i.numpy() for i in affines[3:]],
+                                                                 target_shape=(img.shape[0], img.shape[1], img.shape[-1]),
+                                                                 target_aff=aff.numpy(),
+                                                                 frames=None,
+                                                                 oob_dist_thresh=10.)
+                    array_to_nifti(str(subj_seg_slices[idx]), la_seg_interp[:, :, None], aff.numpy())
+                else:
+                    la_seg_interp = la_segs[idx]
                 la_fg = la_seg_interp > 0
                 la_fg_dil = np.moveaxis(binary_dilation(np.moveaxis(la_fg, -1, 0), iterations=5), 0, -1)
                 la_gt_bg = ~la_fg_dil

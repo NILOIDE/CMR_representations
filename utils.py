@@ -1,9 +1,13 @@
+from pathlib import Path
 from typing import Union, Optional, Tuple, List, Dict
 
 import cv2
 import numpy as np
+import skimage
 import torch
 import torch.nn.functional as F
+import meshplot as mp
+from matplotlib import pyplot as plt
 
 MEAN_SAX_LV_VALUE = 222.7909
 MAX_SAX_VALUE = 487.0
@@ -182,18 +186,6 @@ def to_1hot(class_indices: torch.Tensor, num_class) -> torch.Tensor:
     return seg_1hot
 
 
-def compute_neighbourhood_matrix(coords: torch.Tensor, ref_coords: torch.Tensor, dist_thresh: float = 0.15):
-    assert len(coords.shape) == 2
-    assert len(ref_coords.shape) == 2
-    if dist_thresh < 0:
-        return torch.zeros((coords.shape[0], coords.shape[0]), dtype=torch.uint8)
-    dists = ref_coords[None].tile((coords.shape[0], 1, 1)) - coords[:, None].tile((1, ref_coords.shape[0], 1))
-    dists = dists.norm(dim=-1)
-    neigh_matrix = dists <= dist_thresh
-    within_range_mask = neigh_matrix.any(dim=-1)
-    return within_range_mask
-
-
 def compute_3d_image_gradients(volume):
     def get_3d_central_diff_kernel(device, dtype):
         kernel = torch.zeros((3, 1, 5, 5, 5), device=device, dtype=dtype)
@@ -249,7 +241,6 @@ def compute_3d_image_gradients_dim_wise(volume):
     return grad_x, grad_y, grad_z
 
 
-
 def compute_3d_image_hessian(volume):
     device, dtype = volume.device, volume.dtype
     # Define second derivative kernels
@@ -300,48 +291,161 @@ def temporal_median_filter(video, kernel_size=3):
     median = unfolded.median(dim=-1).values  # (B, C, H, W, T_new)
     return median
 
-def spatial_median_filter(video, kernel_size=(3, 3, 1)):
-    """Apply temporal median filter along time dimension with sliding window."""
-    # video: (B, C, H, W, T)
-    B, C, H, W, T = video.shape
-    if isinstance(kernel_size, int):
-        kernel_size = [kernel_size]*len(video.shape[2:])
-    if any([k % 2 == 0 for k in kernel_size]):
-        raise ValueError(f"kernel_size must be odd: {kernel_size}")
-    # Loop-around padding
-    video_pad = F.pad(video, (0,0, kernel_size[0]//2, kernel_size[0]//2, kernel_size[1]//2, kernel_size[1]//2, 0,0,0,0), mode='constant', value=0.0)
-    video_pad = torch.cat((video_pad[...,-(kernel_size[2]//2):], video_pad, video_pad[...,:kernel_size[2]//2]), -1)
-    # Unfold time axis
-    unfolded = video_pad.unfold(dimension=2, size=kernel_size[0], step=1)  # (B, C, H_new, W, T, k)
-    unfolded = unfolded.unfold(dimension=3, size=kernel_size[1], step=1)  # (B, C, H_new, W_new, T, k, k)
-    unfolded = unfolded.unfold(dimension=4, size=kernel_size[2], step=1)  # (B, C, H,_new W_new, T_new, k, k, k)
-    # Take median along kernel_size dimension
-    unfolded_ = unfolded.reshape(B, C, H, W, T, -1)
-    median = unfolded_.median(dim=-1).values  # (B, C, H, W, T)
-    return median
+
+def _denoise_single_frame(args: Tuple[List[np.ndarray], int, int, float, Optional[int], Optional[int]]) -> np.ndarray:
+    frames_uint8_pad, frame_index, temporal_window_size, h, template_window_size, search_window_size = args
+    denoised_frame = cv2.fastNlMeansDenoisingMulti(frames_uint8_pad, frame_index, temporal_window_size,
+        h, template_window_size, search_window_size)
+    return denoised_frame
 
 
-def nlm_denoise_multi(frames, temporal_window_size, h, template_window_size=None, search_window_size=None):
+def nlm_denoise_multi_parallel(
+        frames: torch.Tensor,
+        temporal_window_size: int,
+        h: float,
+        template_window_size: Optional[int] = None,
+        search_window_size: Optional[int] = None,
+        num_processes: Optional[int] = None
+) -> torch.Tensor:
+    """
+    Parallel version of NLM denoising using multiprocessing
+
+    Args:
+        frames: Input tensor of shape (H, W, T)
+        temporal_window_size: Number of frames to use for denoising
+        h: Filter strength
+        template_window_size: Template patch size
+        search_window_size: Search window size
+        num_processes: Number of processes to use (default: cpu_count())
+
+    Returns:
+        Denoised frames tensor of shape (H, W, T)
+    """
+    from multiprocessing import Pool, cpu_count
+    if num_processes is None:
+        num_processes = cpu_count()
     H, W, T = frames.shape
-    frames_uint8 = (frames*255.).round().clip(0., 255.).to(torch.uint8)
+    # Convert to uint8 numpy arrays
+    frames_uint8 = (frames * 255.).round().clip(0., 255.).to(torch.uint8)
     frames_uint8 = frames_uint8.numpy()
-    frames_uint8 = [frames_uint8[...,i] for i in range(T)]
-    frames_uint8_pad = frames_uint8[-(temporal_window_size//2):] + frames_uint8 + frames_uint8[:(temporal_window_size//2)]
-    frames_dn = []
-    for i in range(temporal_window_size//2, T+(temporal_window_size//2)):
-        f = cv2.fastNlMeansDenoisingMulti(frames_uint8_pad, i, temporal_window_size, h, template_window_size, search_window_size)
-        frames_dn.append(f)
+    frames_uint8 = [frames_uint8[..., i] for i in range(T)]
+    # Pad frames for temporal window
+    frames_uint8_pad = (frames_uint8[-(temporal_window_size // 2):] +
+                        frames_uint8 +
+                        frames_uint8[:(temporal_window_size // 2)])
+    # Prepare arguments for each frame
+    frame_args = [
+        (frames_uint8_pad, i, temporal_window_size, h, template_window_size, search_window_size)
+        for i in range(temporal_window_size // 2, T + (temporal_window_size // 2))
+    ]
+    # Process frames in parallel
+    with Pool(processes=num_processes) as pool:
+        frames_dn = pool.map(_denoise_single_frame, frame_args)
+    # Stack results and convert back to torch tensor
     frames_dn = np.stack(frames_dn, -1)
     frames_dn = torch.from_numpy(frames_dn).to(torch.float32) / 255.
     assert frames_dn.shape == (H, W, T)
     return frames_dn
 
 
-from PIL import Image
+
 def to_gif(imgs, name="arr"):
+    from PIL import Image
+    name = Path('debug_denoise') / name
+    name.parent.mkdir(exist_ok=True)
+    assert isinstance(imgs, torch.Tensor)
+    assert imgs.dtype == torch.float32
+    # assert not (imgs > 1.9).any()
     imgs = imgs.moveaxis(-1, 0)
-    imgs = (imgs*255).round().to(torch.uint8).numpy()
-    imgs = np.stack([imgs]*3, -1)
+    imgs = (imgs*255).round().clip(0.0,255.0).to(torch.uint8).numpy()
+    # imgs = np.stack([imgs]*3, 1)
     imgs = [Image.fromarray(img) for img in imgs]
     # duration is the number of milliseconds between frames; this is 40 frames per second
-    imgs[0].save(f"{name}.gif", save_all=True, append_images=imgs[1:], duration=50, loop=0)
+    imgs[0].save(f"{str(name)}.gif", save_all=True, append_images=imgs[1:], duration=50, loop=0)
+
+
+def process_segmentation_with_marching_cubes(segmentation, spacing=(1.0, 1.0, 1.0),
+                                             level=0.5, step_size=1, allow_degenerate=False):
+    """
+    Process 3D segmentation using marching cubes for each foreground class.
+
+    Args:
+        segmentation: numpy uint8 array of shape (D, H, W) with class labels
+        spacing: tuple of voxel spacing in each dimension
+        level: isosurface level for marching cubes
+        step_size: step size for marching cubes (larger = faster, less detailed)
+        allow_degenerate: whether to allow degenerate triangles
+
+    Returns:
+        dict: Dictionary containing mesh data for each class
+    """
+    H, W, D = segmentation.shape
+    # Padding
+    segmentation_pad = np.zeros((H + 2, W + 2, D + 2), np.uint8)
+    segmentation_pad[1:-1, 1:-1, 1:-1] = segmentation
+    # Get unique classes (excluding background class 0)
+    unique_classes = np.unique(segmentation_pad)
+    foreground_classes = unique_classes[unique_classes > 0]
+    print(f"Found {len(foreground_classes)} foreground classes: {foreground_classes}")
+    meshes = {}
+
+    for class_id in foreground_classes:
+        # Create binary mask for current class
+        binary_mask = (segmentation_pad == class_id).astype(np.uint8)
+        # Skip if class has too few voxels
+        if np.sum(binary_mask) < 10:
+            print(f"Skipping class {class_id}: too few voxels ({np.sum(binary_mask)})")
+            continue
+        try:
+            # Apply marching cubes
+            vertices, faces, normals, values = skimage.measure.marching_cubes(
+                binary_mask,
+                level=level,
+                spacing=spacing,
+                step_size=step_size,
+                allow_degenerate=allow_degenerate
+            )
+            # Store mesh data
+            meshes[class_id] = {
+                'vertices': vertices,
+                'faces': faces,
+                'normals': normals,
+                'values': values,
+                'n_vertices': len(vertices),
+                'n_faces': len(faces),
+                'volume': np.sum(binary_mask) * np.prod(spacing)
+            }
+            print(f"Class {class_id}: {len(vertices)} vertices, {len(faces)} faces")
+        except Exception as e:
+            print(f"Error processing class {class_id}: {e}")
+            continue
+    return meshes
+
+
+def create_meshplot_visualization(meshes, colors=None):
+    """
+    Create meshplot visualization for multiple meshes.
+
+    Args:
+        meshes: dict of mesh data from process_segmentation_with_marching_cubes
+        colors: optional list of colors for each class
+
+    Returns:
+        meshplot viewer object
+    """
+    mp.offline()  # Initialize meshplot
+    # Default colors if not provided
+    if colors is None:
+        colors = np.array(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)))
+    plot = None
+    for idx, (class_id, mesh_data) in enumerate(meshes.items()):
+        vertices = mesh_data['vertices']
+        faces = mesh_data['faces']
+        # Select color
+        color = colors[idx] if idx < len(colors) else np.random.rand(3)
+        # Create or add to plot
+        if plot is None:
+            plot = mp.plot(vertices, faces, c=color[:3], return_plot=True)
+        else:
+            plot.add_mesh(vertices, faces, c=color[:3])
+    return plot
