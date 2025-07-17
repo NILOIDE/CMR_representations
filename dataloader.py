@@ -48,8 +48,9 @@ class CMRDataModule(pl.LightningDataModule):
         self.num_test = 1
         self.max_slices = -1
         self.num_workers = num_workers
+        self.subject_data = []
 
-    def setup(self, stage: str, pickle_name=None):
+    def prepare_data(self) -> None:
         num_subjects = self.num_train + self.num_val + self.num_test
         pickle_name = f"dataset_paths_{num_subjects}_{Path(self.store_path).name}.pkl"
         try:
@@ -62,17 +63,17 @@ class CMRDataModule(pl.LightningDataModule):
             with open(pickle_name, 'wb') as handle:
                 pickle.dump(subject_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
         assert len(subject_data) == num_subjects
-
+        self.subject_data = subject_data
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
-        train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(subject_data))), split)]
-
-        self.train_dset = CardiacUKBB([subject_data[i] for i in train_idxs][:],
+        train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
+        self.train_dset = CardiacUKBB([self.subject_data[i] for i in train_idxs][:],
                                       num_coords=self.num_coords)
-        self.val_dset = CardiacUKBB([subject_data[i] for i in val_idxs],
+        self.val_dset = CardiacUKBB([self.subject_data[i] for i in val_idxs],
                                     num_coords=self.num_coords)
-        self.test_dset = CardiacUKBB([subject_data[i] for i in test_idxs],
+        self.test_dset = CardiacUKBB([self.subject_data[i] for i in test_idxs],
                                      num_coords=self.num_coords)
 
+    def setup(self, stage: str):
         self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True,
                                             num_workers=self.num_workers, pin_memory=True,
                                             persistent_workers=self.num_workers > 0)
@@ -107,7 +108,8 @@ class CMRDataModule(pl.LightningDataModule):
 
     def find_subjects(self, max_num=100, **kwargs):
         count = 0
-        max_slices = 0
+        max_slices = 17
+        max_shape = np.array([0,0,0,0])
         images = []
         segs = []
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
@@ -140,18 +142,20 @@ class CMRDataModule(pl.LightningDataModule):
             images.append(slices)
             seg_slices = seg_la_files + seg_sa_files
             segs.append(seg_slices)
-            if len(slices) > max_slices:
-                max_slices = len(slices)
+            max_slices = max(len(slices), max_slices)
+            shape = np.array([nib.load(i).shape for i in slices]).max(0)
+            max_shape = np.maximum(shape, max_shape)
             count += 1
         assert count == max_num
         print(f"Found {len(images)} subjects.")
 
-        subject_data_paths = self.preprocess_subject_data(images, segs, max_slices,
+        max_shape = (*max_shape[:2], max_shape[-1])
+        subject_data_paths = self.preprocess_subject_data(images, segs, max_slices, max_shape,
                                                           replace_existing=self.replace_existing_processed)
 
         return subject_data_paths
 
-    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices, replace_existing=False, debug=False):
+    def preprocess_subject_data(self, subj_paths, seg_paths, max_slices, dim_max, replace_existing=False, debug=False):
         if replace_existing:
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
@@ -273,22 +277,21 @@ class CMRDataModule(pl.LightningDataModule):
                 la_gt_available_masks.append(la_gt_bg)
 
             # Place all subject slices into one combined slice stack (slices, height_max, width_max, time)
-            dim_max = torch.amax(torch.tensor([i.shape[:2] for i in images]), dim=0)
-            im_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]), dtype=torch.uint8)
+            im_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
             im_pad_mask = torch.zeros_like(im_pad, dtype=torch.bool)
             for i, im in enumerate(images):
                 im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze()
                 im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
             # non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
-            img_d_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1], 3), dtype=torch.float32)
-            img_dd_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1], 6), dtype=torch.float32)
+            img_d_pad = torch.zeros((len(images), *dim_max, 3), dtype=torch.float32)
+            img_dd_pad = torch.zeros((len(images), *dim_max, 6), dtype=torch.float32)
             for i, (d, dd) in enumerate(zip(image_ds, image_dds)):
                 img_d_pad[i, :d.shape[0], :d.shape[1]] = d.squeeze()
                 img_dd_pad[i, :dd.shape[0], :dd.shape[1]] = dd.squeeze()
-            seg_pad = torch.zeros((len(images), *dim_max, images[-1].shape[-1]), dtype=torch.uint8)
+            seg_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
             for i, seg in enumerate(segs):
                 seg_pad[i, :seg.shape[0], :seg.shape[1]] = seg.squeeze()
-            gt_available_pad = torch.zeros((len(la_gt_available_masks), *dim_max, images[-1].shape[-1]), dtype=torch.bool)
+            gt_available_pad = torch.zeros((len(la_gt_available_masks), *dim_max), dtype=torch.bool)
             for i, a in enumerate(la_gt_available_masks):
                 gt_available_pad[i, :a.shape[0], :a.shape[1]] = a.squeeze()
 
@@ -392,10 +395,6 @@ class CardiacUKBB(Dataset):
         # Load image and seg data
         img, img_dt, img_ddt, seg, gt_avail, non_padding_indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
-
-        # img_d = spatial_gradient(img[:, None], mode="diff", order=1, normalized=False).abs().sum((1,2))
-        # img_dd = spatial_gradient(img[:, None], mode="diff", order=2, normalized=False).abs().sum((1,2))
-        # img = torch.stack((img, img_d, img_dd), dim=-1)
 
         if num_coords is None:
             num_coords = self.num_coords

@@ -422,18 +422,18 @@ def process_segmentation_with_marching_cubes(segmentation, spacing=(1.0, 1.0, 1.
     return meshes
 
 
-def create_meshplot_visualization(meshes, colors=None):
+def create_meshplot_visualization(meshes, file_name, colors=None):
     """
     Create meshplot visualization for multiple meshes.
 
     Args:
         meshes: dict of mesh data from process_segmentation_with_marching_cubes
+        file_name:
         colors: optional list of colors for each class
-
     Returns:
         meshplot viewer object
     """
-    mp.offline()  # Initialize meshplot
+    mp.website()  # Initializing as website won't save plot to working dir
     # Default colors if not provided
     if colors is None:
         colors = np.array(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0)))
@@ -448,4 +448,5 @@ def create_meshplot_visualization(meshes, colors=None):
             plot = mp.plot(vertices, faces, c=color[:3], return_plot=True)
         else:
             plot.add_mesh(vertices, faces, c=color[:3])
+    plot.save(file_name)
     return plot
