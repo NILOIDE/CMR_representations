@@ -343,7 +343,7 @@ class INR(pl.LightningModule):
     def training_step(self, batch):
         opt_inr, opt_deform, opt_inten = self.optimizers()
 
-        (imgs, coords_voxel, values, values_dt, values_ddt, segs, gt_avail,
+        (imgs, max_slices, coords_voxel, values, values_dt, values_ddt, segs, gt_avail,
          aff_params, spacings, needs_flip, subject_idx, slice_idx, min_coords, max_coords) = batch
 
         coords_voxel = coords_voxel + torch.randn(coords_voxel.shape, device=coords_voxel.device) * 5e-2  # TODO
@@ -623,7 +623,7 @@ def main(data_dir, wandb_disabled="true"):
 
     params = Params()
     data_module = CMRDataModule(load_la_dir=data_dir, load_sa_dir=data_dir,
-                                preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5",
+                                preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_conv",
                                 batch_size=params.batch_size, num_coords=params.num_coords, num_workers=0)
     data_module.prepare_data()
 

@@ -26,7 +26,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path,
-                 replace_existing_processed=False,
+                 replace_existing_processed=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
                  num_workers: int = 0):
@@ -34,7 +34,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
-        self.replace_existing_processed = True
+        self.replace_existing_processed = replace_existing_processed
         self.batch_size = batch_size
         self.num_coords = num_coords
         self.train_dset = None
@@ -277,18 +277,18 @@ class CMRDataModule(pl.LightningDataModule):
                 la_gt_available_masks.append(la_gt_bg)
 
             # Place all subject slices into one combined slice stack (slices, height_max, width_max, time)
-            im_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
+            im_pad = torch.zeros((max_slices, *dim_max), dtype=torch.uint8)
             im_pad_mask = torch.zeros_like(im_pad, dtype=torch.bool)
             for i, im in enumerate(images):
                 im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze()
                 im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
             # non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
-            img_d_pad = torch.zeros((len(images), *dim_max, 3), dtype=torch.float32)
-            img_dd_pad = torch.zeros((len(images), *dim_max, 6), dtype=torch.float32)
+            img_d_pad = torch.zeros((max_slices, *dim_max, 3), dtype=torch.float32)
+            img_dd_pad = torch.zeros((max_slices, *dim_max, 6), dtype=torch.float32)
             for i, (d, dd) in enumerate(zip(image_ds, image_dds)):
                 img_d_pad[i, :d.shape[0], :d.shape[1]] = d.squeeze()
                 img_dd_pad[i, :dd.shape[0], :dd.shape[1]] = dd.squeeze()
-            seg_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
+            seg_pad = torch.zeros((max_slices, *dim_max), dtype=torch.uint8)
             for i, seg in enumerate(segs):
                 seg_pad[i, :seg.shape[0], :seg.shape[1]] = seg.squeeze()
             gt_available_pad = torch.zeros((len(la_gt_available_masks), *dim_max), dtype=torch.bool)
@@ -322,6 +322,7 @@ class CMRDataModule(pl.LightningDataModule):
             save_path.parent.mkdir(exist_ok=True)
             while not save_path.exists() or save_path.stat().st_size < 100:
                 with h5py.File(save_path, 'w') as f:
+                    f['max_slices'] = max_slices
                     f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
                     f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
                     f.create_dataset('image_d_padded', data=img_d_pad.moveaxis(-1, 0).moveaxis(-1, 0).numpy(), dtype=np.float32, compression=1)  # Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
@@ -362,16 +363,19 @@ class CardiacUKBB(Dataset):
             selected_frame = frame_idx
 
         with h5py.File(self.data_paths[subj_idx], 'r') as f:
+            max_slices = f['max_slices'][()]
             # Load only the randomly selected image frame from the (time, slices, H, W) volume
-            ims = torch.tensor(f['image_padded'][:], dtype=torch.float32) / 255.
+            ims = torch.tensor(f['image_padded'][:, :max_slices], dtype=torch.float32) / 255.
             image = ims[selected_frame]
             image_dt = image
             image_ddt = image
-            # image_dt = torch.tensor(f['image_d_padded'][selected_frame, 2:3], dtype=torch.float32).moveaxis(0, -1)
-            # image_ddt = torch.tensor(f['image_dd_padded'][selected_frame, 5:6], dtype=torch.float32).moveaxis(0, -1)
+            ims_pad = torch.zeros((max_slices, *image.shape))
+            ims_pad[:max_slices] = ims.moveaxis(0, -1)
+            # image_dt = torch.tensor(f['image_d_padded'][selected_frame, 2:3, :max_slices], dtype=torch.float32).moveaxis(0, -1)
+            # image_ddt = torch.tensor(f['image_dd_padded'][selected_frame, 5:6, :max_slices], dtype=torch.float32).moveaxis(0, -1)
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
-            image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
-            seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
+            image_mask = torch.tensor(f['image_padded_mask'][selected_frame, :max_slices], dtype=torch.bool)
+            seg = torch.tensor(f['seg_padded'][selected_frame, :max_slices], dtype=torch.uint8)
             la_gt_available = torch.ones(image.shape, dtype=torch.bool)
             la_gt_available[:3] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
@@ -387,7 +391,7 @@ class CardiacUKBB(Dataset):
             aff_params_padded = torch.tensor(f['aff_params_padded'][:], dtype=torch.float32).squeeze(-2)
             spacings_padded = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
-        return ims, image, image_dt, image_ddt, seg, la_gt_available, full_indices, coord_min, coord_max, \
+        return ims_pad, max_slices, image, image_dt, image_ddt, seg, la_gt_available, full_indices, coord_min, coord_max, \
             aff_params_padded, spacings_padded, flippings_padded
 
     def __getitem__(self, idx: int):
@@ -395,10 +399,8 @@ class CardiacUKBB(Dataset):
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        ims, img, img_dt, img_ddt, seg, gt_avail, non_padding_indices, min_coords, max_coords, \
+        ims, max_slices, img, img_dt, img_ddt, seg, gt_avail, non_padding_indices, min_coords, max_coords, \
             aff_params_padded, spacings_padded, needs_flip_padded = self.load_subject_data(idx, frame)
-
-        ims = ims[..., :208, :208]
 
         if num_coords is None:
             num_coords = self.num_coords
@@ -424,7 +426,7 @@ class CardiacUKBB(Dataset):
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         sub_idx = torch.tensor(idx, dtype=torch.long)
-        return (ims, voxel_indices, image_values_sample, image_dt_values_sample, image_ddt_values_sample,
+        return (ims, max_slices, voxel_indices, image_values_sample, image_dt_values_sample, image_ddt_values_sample,
                 seg_sample, gt_avail_sample, aff_params_padded, spacings_padded, needs_flip_padded,
                 sub_idx, slice_indices, min_coords, max_coords)
 
