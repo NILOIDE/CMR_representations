@@ -103,6 +103,8 @@ class PosEncodingNeRFAnnealed(PosEncodingNeRFOptimized):
     def get_freq_mask_alpha(self, current_iter):
         # based on https://github.com/Jiawei-Yang/FreeNeRF/blob/main/internal/math.py#L277
         if current_iter is not None and current_iter < self.max_iter:
+            if current_iter in {self.max_iter // 4, self.max_iter // 2, self.max_iter*3 // 4, self.max_iter-1}:
+                print(f'Pos_enc reached {current_iter/self.max_iter*100:.1f}% iters')
             mask_per_dim = []
             for freqs, start_freqs in zip(self.num_frequencies, self.start_frequencies):
                 freq_mask = np.zeros(freqs)
