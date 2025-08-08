@@ -15,6 +15,21 @@ MEAN_4CH_LV_VALUE = 224.8285
 MAX_4CH_LV_VALUE = 473.0
 
 
+def get_center_coord(segmentation_map):
+    # Get the largest contour
+    contours, _ = cv2.findContours(segmentation_map.numpy().astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest_contour = max(contours, key=cv2.contourArea)
+        M = cv2.moments(largest_contour)
+        if M["m00"] != 0:
+            cx = M["m10"] / M["m00"]
+            cy = M["m01"] / M["m00"]
+            return torch.tensor((cy, cx))
+        raise ValueError('Invalid contour.')
+    raise ValueError('No foreground found.')
+
+
 def normalize_image(im: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
     """ Normalize array to range [0, 1] """
     min_, max_ = 0.0, im.max()
@@ -207,6 +222,9 @@ def compute_3d_image_gradients(volume):
 
         return kernel * -1
     # volume: (B, 1, D, H, W)
+
+    assert volume.dtype == torch.float, "Must be a [0,1] float tensor"
+    assert not (volume[...,0] > 1.0).any(), "Must be a [0,1] float tensor"
     device, dtype = volume.device, volume.dtype
     volume_pad = torch.cat((volume[..., -2:], volume, volume[..., :2]), -1)
     volume_pad = F.pad(volume_pad, (0,0,2,2,2,2))  # F.pad takes padding sequence backwards
@@ -321,6 +339,8 @@ def nlm_denoise_multi_parallel(
     Returns:
         Denoised frames tensor of shape (H, W, T)
     """
+    assert frames.dtype == torch.float, "Must be a [0,1] float tensor"
+    assert not (frames[...,0] > 1.0).any(), "Must be a [0,1] float tensor"
     from multiprocessing import Pool, cpu_count
     if num_processes is None:
         num_processes = cpu_count()
@@ -349,9 +369,9 @@ def nlm_denoise_multi_parallel(
 
 
 
-def to_gif(imgs, name="arr"):
+def to_gif(imgs, dir_name, name="arr"):
     from PIL import Image
-    name = Path('debug_denoise') / name
+    name = Path(dir_name) / name
     name.parent.mkdir(exist_ok=True)
     assert isinstance(imgs, torch.Tensor)
     assert imgs.dtype == torch.float32

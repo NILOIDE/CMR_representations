@@ -93,13 +93,21 @@ class WIRE(Layer):
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_size, out_size, bias=True, dropout=0.0, **kwargs):
+    def __init__(self, in_size, out_size, do_3d=True, bias=True, dropout=0.0,  **kwargs):
         super(ConvBlock, self).__init__()
-        self.conv1 = nn.Conv3d(in_size, out_size, 3, bias=bias)
-        self.conv2 = nn.Conv3d(out_size, out_size, 3, bias=bias)
+        self.do_3d = do_3d
+        t_channels = 3 if do_3d else 1
+        self.conv1 = nn.Conv3d(in_size, out_size, (3, 3, t_channels), bias=bias)
+        self.conv2 = nn.Conv3d(out_size, out_size, (3, 3, t_channels), bias=bias)
         self.dropout = nn.Dropout3d(dropout)
 
+    def pad(self, x):
+        if self.do_3d:
+            x = F.pad(x, (1,1, 0,0,0,0), mode='circular')
+        x = F.pad(x, (0,0, 1,1,1,1), mode='constant')
+        return x
+
     def forward(self, x):
-        x = self.dropout(F.relu(self.conv1(x)))
-        x = x + F.relu(self.conv2(x))
+        x = self.dropout(F.relu(self.conv1(self.pad(x))))
+        x = x + F.relu(self.conv2(self.pad(x)))
         return x
