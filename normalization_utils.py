@@ -34,7 +34,6 @@ def scanner_to_image_coords(world_points: torch.Tensor, affines: torch.Tensor) -
     # Return the spatial coordinates (drop homogeneous coordinate)
     return world_points[:, :3]
 
-
 def crop_around_heart(affines: List[torch.Tensor],
                       segs: List[torch.Tensor],
                       arrays: List[List[torch.Tensor]],
@@ -49,16 +48,49 @@ def crop_around_heart(affines: List[torch.Tensor],
     centers = centers.round().long()
     crop_sizes = torch.tensor((crop_size_2ch, crop_size_3ch, crop_size_4ch, *[crop_size_sa]*len(affines[3:])),
                               dtype=torch.long)
+    # New origin based on center
     new_origins = (centers - crop_sizes//2).clip(min=0)
     crop_ends = new_origins + crop_sizes
+    # Crop the segmentations
     new_segs = [i[o[0]:e[0], o[1]:e[1]] for i, o, e in zip(segs, new_origins, crop_ends)]
     new_arrays = []
     for i, arr in enumerate(arrays):
         new_arr = [i[o[0]:e[0], o[1]:e[1]] for i, o, e in zip(arr, new_origins, crop_ends)]
         new_arrays.append(new_arr)
+    new_affines = [update_affine_after_crop(aff, o) for aff, o, in zip(affines, new_origins)]
+    # for i, affine in enumerate(affines):
+    #     new_affine = affine.clone()
+    #     # The translation in image coordinates due to cropping
+    #     offset = torch.tensor([new_origins[i][0], new_origins[i][1], 0.0], dtype=affine.dtype, device=affine.device)
+    #     # Convert the pixel offset to scanner space offset
+    #     scanner_offset = affine[:3, :3] @ offset
+    #     # Update the translation component (last column, first 3 rows)
+    #     new_affine[:3, 3] += scanner_offset
+    #     new_affines.append(new_affine)
     if debug:
         [to_gif(torch.cat((s.float()/4, im), dim=1), 'debug_crop', str(i)) for i, (s, im) in enumerate(zip(new_segs, new_arrays[0]))]
-    return affines, new_segs, new_arrays
+    return new_affines, new_segs, new_arrays
+
+
+def update_affine_after_crop(affine_matrix, crop_start_xy):
+    """
+    Update affine matrix after cropping an image.
+    Args:
+        affine_matrix: 4x4 affine transformation matrix
+        crop_start_xy: tuple of (x_start, y_start) crop coordinates
+    Returns:
+        Updated 4x4 affine matrix
+    """
+    affine_new = affine_matrix.clone()
+    rotation = affine_matrix[:3, :3]
+    # Calculate offset in scanner coordinates
+    crop_start = torch.ones((3,))
+    crop_start[:2] = crop_start_xy
+    offset = rotation @ crop_start
+    # Update translation
+    affine_new[:3, 3] += offset
+    return affine_new
+
 
 
 
@@ -268,23 +300,3 @@ def normalize_slice_orientation(affines: List[torch.Tensor], segs: Optional[List
         array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), segs[6][:, :, None].numpy(), oriented_affines[6].numpy())
         array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), segs[7][:, :, None].numpy(), oriented_affines[7].numpy())
     return oriented_affines
-
-
-def update_affine_after_crop(affine_matrix, crop_start_xy):
-    """
-    Update affine matrix after cropping an image.
-    Args:
-        affine_matrix: 4x4 affine transformation matrix
-        crop_start_xy: tuple of (x_start, y_start) crop coordinates
-    Returns:
-        Updated 4x4 affine matrix
-    """
-    affine_new = affine_matrix.clone()
-    rotation = affine_matrix[:3, :3]
-    # Calculate offset in scanner coordinates
-    crop_start = torch.ones((3,))
-    crop_start[:2] = crop_start_xy
-    offset = rotation @ crop_start
-    # Update translation
-    affine_new[:3, 3] += offset
-    return affine_new

@@ -27,7 +27,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path,
-                 replace_existing_processed=True,
+                 replace_existing_processed=False,
                  crop_around_heart=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
@@ -46,7 +46,7 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 64
+        self.num_train = 100
         self.num_val = 8
         self.num_test = 1
         self.dim_max = None
@@ -74,9 +74,9 @@ class CMRDataModule(pl.LightningDataModule):
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
         self.train_dset = CardiacUKBB([self.subject_data[i] for i in train_idxs][:],
                                       num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
-        self.val_dset = CardiacUKBBValidationFullImage([self.subject_data[i] for i in val_idxs],
+        self.val_dset = CardiacUKBB([self.subject_data[i] for i in val_idxs],
                                     num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
-        self.test_dset = CardiacUKBBValidationFullImage([self.subject_data[i] for i in test_idxs],
+        self.test_dset = CardiacUKBB([self.subject_data[i] for i in test_idxs],
                                      num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
         self.data_prepared = True
 

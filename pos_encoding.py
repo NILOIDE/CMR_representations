@@ -85,6 +85,7 @@ class PosEncodingNeRFAnnealed(PosEncodingNeRFOptimized):
     def __init__(self, *args, **kwargs):
         super(PosEncodingNeRFOptimized, self).__init__(*args, **kwargs)
         self.max_iter = kwargs.get("anneal_max_iter", 10_000)
+        self.print_thresholds = [0.01, 0.02, 0.03, 0.1, 0.25, 0.5, 0.75, 1.0]
         self.start_frequency_prop = kwargs.get("anneal_start_prop", 0.2)
         self.start_frequencies = [max(int(round(i * self.start_frequency_prop)), 1) for i in self.num_frequencies]
         self.freq_scale = kwargs.get("coords_freq_scale", [1.0])
@@ -102,26 +103,27 @@ class PosEncodingNeRFAnnealed(PosEncodingNeRFOptimized):
 
     def get_freq_mask_alpha(self, current_iter):
         # based on https://github.com/Jiawei-Yang/FreeNeRF/blob/main/internal/math.py#L277
-        if current_iter is not None and current_iter < self.max_iter:
-            if current_iter in {self.max_iter // 4, self.max_iter // 2, self.max_iter*3 // 4, self.max_iter-1}:
+        if current_iter is not None:
+            if self.print_thresholds and (current_iter / self.max_iter) >= self.print_thresholds[0]:
                 print(f'Pos_enc reached {current_iter/self.max_iter*100:.1f}% iters')
-            mask_per_dim = []
-            for freqs, start_freqs in zip(self.num_frequencies, self.start_frequencies):
-                freq_mask = np.zeros(freqs)
-                ptr = (freqs - start_freqs) * (current_iter / self.max_iter) + start_freqs
-                int_ptr = int(ptr)
-                freq_mask[: int_ptr + 1] = 1.0  # assign the integer part
-                freq_mask[int_ptr: int_ptr + 1] = (ptr - int_ptr)  # assign the fractional part
-                freq_mask_alpha = torch.clip(torch.from_numpy(freq_mask), 1e-8,
-                                                  1 - 1e-8).float()  # for numerical stability
-                # windowed_alpha = ptr
-                mask_per_dim.append(freq_mask_alpha)
-            freq_mask_alpha = torch.cat(mask_per_dim, dim=0)
-            return freq_mask_alpha
-        else:
-            freq_mask_alpha = torch.ones(sum(self.num_frequencies)).float()
-            # windowed_alpha = self.num_frequencies + 1
-            return freq_mask_alpha
+                del self.print_thresholds[0]
+            if current_iter < self.max_iter:
+                mask_per_dim = []
+                for freqs, start_freqs in zip(self.num_frequencies, self.start_frequencies):
+                    freq_mask = np.zeros(freqs)
+                    ptr = (freqs - start_freqs) * (current_iter / self.max_iter) + start_freqs
+                    int_ptr = int(ptr)
+                    freq_mask[: int_ptr + 1] = 1.0  # assign the integer part
+                    freq_mask[int_ptr: int_ptr + 1] = (ptr - int_ptr)  # assign the fractional part
+                    freq_mask_alpha = torch.clip(torch.from_numpy(freq_mask), 1e-8,
+                                                      1 - 1e-8).float()  # for numerical stability
+                    # windowed_alpha = ptr
+                    mask_per_dim.append(freq_mask_alpha)
+                freq_mask_alpha = torch.cat(mask_per_dim, dim=0)
+                return freq_mask_alpha
+        freq_mask_alpha = torch.ones(sum(self.num_frequencies)).float()
+        # windowed_alpha = self.num_frequencies + 1
+        return freq_mask_alpha
 
     def forward(self, coords, curr_iter=None):
         coords_ = torch.cat([torch.tile(coords[..., j:j + 1], (1, n)) for j, n in enumerate(self.num_frequencies)],
