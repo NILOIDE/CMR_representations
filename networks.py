@@ -11,7 +11,7 @@ class Encoder(nn.Module):
     """ Simple decoder that uses a single averaged latent vector in its input to
     condition the way coordinates are processed. """
 
-    def __init__(self, filters: Tuple[int, ...], **kwargs):
+    def __init__(self, filters: Tuple[int, ...], out_dim: int, **kwargs):
         super(Encoder, self).__init__()
         # self.poolings = [(2,2,2), (2,2,1), (2,2,5), (2,2,1), (2,2,1), (2,2,5), (2,2,1)]  # For full img
         self.poolings = [(2,2,2), (2,2,1), (2,2,5), (2,2,5), (2,2,1), (2,2,1), (2,2,1)]  # For cropped
@@ -22,15 +22,14 @@ class Encoder(nn.Module):
             do_3d = t_size > 1
             a.append(ConvBlock(filters[i], filters[i+1], do_3d))
             t_size //= self.poolings[i][-1]
-        # a.append(ConvBlock(filters[-1], filters[-1]))
         self.layers = nn.Sequential(*a)
         self.global_pool = nn.AdaptiveAvgPool3d(1)
-        self.out_dim = filters[-1]
+        self.out_dim = out_dim
         self.aff_emb = PosEncodingNeRFAnnealed(in_dim=6, # 3D + Cyclical time
                                                num_frequencies=(7, 7, 7, 7, 7, 7),
                                                anneal_max_iter=kwargs['pe_anneal_max_iter'],
                                                anneal_start_prop=kwargs['pe_anneal_start_prop'])
-        self.aff_enc = nn.Linear(self.aff_emb.out_dim, self.out_dim)
+        self.out_enc = nn.Linear(self.aff_emb.out_dim + filters[-1], self.out_dim)
 
     def forward(self, x: torch.Tensor, aff_params: torch.Tensor, num_subj_slices: torch.Tensor, t: int) -> torch.Tensor:
         # Make sure we have a channel dim
@@ -49,14 +48,15 @@ class Encoder(nn.Module):
             x_ = F.avg_pool3d(x_, pool_size)
         x_ = self.layers[-1](x_)
         # Apply global pooling along spatial and temporal dims. We obtain 1 embedding per slice
-        x_ = self.global_pool(x_).squeeze((-3, -2, -1))
+        x_pooled_ = self.global_pool(x_).squeeze((-3, -2, -1))
         # Encode affine parameters into learned slice embeddings
         aff_ = aff_params[pad_slices]
-        aff_enc_ = self.aff_enc(self.aff_emb(aff_, t))
-        x_ = x_ + aff_enc_
+        aff_enc_ = self.aff_emb(aff_, t)
+        out_ = torch.cat((x_pooled_, aff_enc_), -1)
+        out_ = self.out_enc(out_)
         # Average across slices. Take into account padding slices into avg operation
-        latents = torch.zeros((B, S, x_.shape[-1]), dtype=x_.dtype, device=x_.device)
-        latents[pad_slices] = x_
+        latents = torch.zeros((B, S, out_.shape[-1]), dtype=x_.dtype, device=x_.device)
+        latents[pad_slices] = out_
         latents = latents.sum(1) / num_subj_slices[:, None]
         return latents
 

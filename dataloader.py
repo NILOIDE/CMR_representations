@@ -15,7 +15,7 @@ from tqdm import tqdm
 import traceback
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBB, CardiacUKBBValidationFullImage
+from dataset import CardiacUKBBFullImage, CardiacUKBBValidationFullImage
 from normalization_utils import crop_around_heart,normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, \
@@ -27,7 +27,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path,
-                 replace_existing_processed=True,
+                 replace_existing_processed=False,
                  crop_around_heart=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
@@ -46,7 +46,7 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 64
+        self.num_train = 100
         self.num_val = 8
         self.num_test = 1
         self.dim_max = None
@@ -72,7 +72,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.subject_data = subject_data
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
-        self.train_dset = CardiacUKBB([self.subject_data[i] for i in train_idxs][:],
+        self.train_dset = CardiacUKBBFullImage([self.subject_data[i] for i in train_idxs][:],
                                       num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
         self.val_dset = CardiacUKBBValidationFullImage([self.subject_data[i] for i in val_idxs],
                                     num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
