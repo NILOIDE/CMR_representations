@@ -1,6 +1,7 @@
 import math
 import os
 import shutil
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -668,15 +669,21 @@ class INR(pl.LightningModule):
             a[20:25,20:25,20:25] = 2
             meshes = process_segmentation_with_marching_cubes(a, level=0.5, step_size=1)
         import tempfile
-        save_dir = Path(f"temp_mesh_files/{subj_id}")
-        save_dir.parent.mkdir(exist_ok=True)
-        save_dir.mkdir(exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=str(save_dir.absolute()), suffix='.html', delete=False) as f:
-            plot = create_meshplot_visualization(meshes, f.name)
-            temp_file_path = f.name
-            with open(f.name, 'r') as html_file:
-                wandb.log({f"{mode}_mesh/subj_{subj_id}": wandb.Html(html_file.read())})
-        shutil.rmtree(save_dir.parent)
+        for i in range(5):
+            try:
+                save_dir = Path(f"temp_mesh_files/{subj_id}")
+                save_dir.parent.mkdir(exist_ok=True)
+                save_dir.mkdir(exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=str(save_dir.absolute()), suffix='.html', delete=False) as f:
+                    plot = create_meshplot_visualization(meshes, f.name)
+                    temp_file_path = f.name
+                    with open(f.name, 'r') as html_file:
+                        wandb.log({f"{mode}_mesh/subj_{subj_id}": wandb.Html(html_file.read())})
+                shutil.rmtree(save_dir.parent)
+                break
+            except Exception as e:
+                print("Error while logging mesh:")
+                traceback.print_exc()
 
 
 @dataclass
