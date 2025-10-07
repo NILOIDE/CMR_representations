@@ -15,7 +15,7 @@ from tqdm import tqdm
 import traceback
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBB, CardiacUKBBValidationFullImage
+from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBValidation, CardiacUKBBFullImage
 from normalization_utils import crop_around_heart,normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, \
@@ -26,7 +26,8 @@ class CMRDataModule(pl.LightningDataModule):
     def __init__(self,
                  load_la_dir: str,
                  load_sa_dir: str,
-                 preprocessed_store_path,
+                 preprocessed_store_path: str,
+                 full_seq_dataset: bool = False,
                  replace_existing_processed=False,
                  crop_around_heart=True,
                  batch_size: int = 32,
@@ -36,6 +37,8 @@ class CMRDataModule(pl.LightningDataModule):
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
+        self.train_dset_class = CardiacUKBBFullImage if full_seq_dataset else CardiacUKBB
+        self.test_dset_class = CardiacUKBBValidationFullImage if full_seq_dataset else CardiacUKBBValidation
         self.crop_around_heart = crop_around_heart
         self.replace_existing_processed = replace_existing_processed
         self.batch_size = batch_size
@@ -72,12 +75,15 @@ class CMRDataModule(pl.LightningDataModule):
         self.subject_data = subject_data
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
-        self.train_dset = CardiacUKBB([self.subject_data[i] for i in train_idxs][:],
-                                      num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
-        self.val_dset = CardiacUKBB([self.subject_data[i] for i in val_idxs],
-                                    num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
-        self.test_dset = CardiacUKBB([self.subject_data[i] for i in test_idxs],
-                                     num_coords=self.num_coords, max_slices=self.get_max_slices(), max_slice_shape=self.get_max_slice_shape())
+        self.train_dset = self.train_dset_class([self.subject_data[i] for i in train_idxs][:],
+                                                num_coords=self.num_coords, max_slices=self.get_max_slices(),
+                                                max_slice_shape=self.get_max_slice_shape())
+        self.val_dset = self.test_dset_class([self.subject_data[i] for i in val_idxs],
+                                             num_coords=self.num_coords, max_slices=self.get_max_slices(),
+                                             max_slice_shape=self.get_max_slice_shape())
+        self.test_dset = self.test_dset_class([self.subject_data[i] for i in test_idxs],
+                                              num_coords=self.num_coords, max_slices=self.get_max_slices(),
+                                              max_slice_shape=self.get_max_slice_shape())
         self.data_prepared = True
 
     def setup(self, stage: str):
