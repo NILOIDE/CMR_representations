@@ -7,6 +7,7 @@ import skimage
 import torch
 import torch.nn.functional as F
 import meshplot as mp
+from PIL import Image
 from matplotlib import pyplot as plt
 
 MEAN_SAX_LV_VALUE = 222.7909
@@ -470,3 +471,39 @@ def create_meshplot_visualization(meshes, file_name, colors=None):
             plot.add_mesh(vertices, faces, c=color[:3])
     plot.save(file_name)
     return plot
+
+
+def video_array_to_file(array, file_name):
+    # Convert to uint8 range [0, 255]
+    array = (array * 255).astype(np.uint8)
+
+    T, C, H, W = array.shape
+
+    # Define video codec and create VideoWriter
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'avc1', 'H264'
+    fps = 10  # frames per second
+    out = cv2.VideoWriter('output.mp4', fourcc, fps, (W, H))
+    for t in range(T):
+        frame = array[t]
+        frame = np.transpose(frame, (1, 2, 0))
+        if C == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        out.write(frame)
+    out.release()
+
+
+def data_frame_to_line_plot(df, x, metric_name, subj_idx):
+    assert df.shape[0] == len(x)
+    plt.figure(figsize=(10, 6))
+    # Plot each column
+    for column in df.columns:
+        plt.plot(x, df[column], label=column, marker='o')
+    plt.xlabel('Step')
+    plt.ylabel(metric_name)
+    plt.title(f'{str(subj_idx)}_{metric_name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    filename = f"{str(subj_idx)}_{metric_name}.png"
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.close()  # Close the figure to free memory

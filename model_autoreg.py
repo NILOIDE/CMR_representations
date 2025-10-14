@@ -3,13 +3,16 @@ import shutil
 import traceback
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Union
 
 import kornia
 import numpy as np
 import torch
 import tqdm
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
+import matplotlib.pyplot as plt
 from torch import nn
 import torch.nn.functional as F
 import lightning.pytorch as pl
@@ -22,15 +25,16 @@ from dataset import CardiacUKBBValidation, CardiacUKBB
 from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
-    process_segmentation_with_marching_cubes
+    process_segmentation_with_marching_cubes, data_frame_to_line_plot
 
 
 class INR_AutoReg(pl.LightningModule):
-    def __init__(self, coord_size: int, num_subjects: int, max_slices: int, **kwargs):
+    def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
         super(INR_AutoReg, self).__init__()
         self.automatic_optimization = False
         self.logging_rate = kwargs['logging_rate']
         self.inference_metrics = {}
+        self.log_path = log_path
 
         self.coord_size = coord_size
         self.intensity_size = 1
@@ -376,7 +380,7 @@ class INR_AutoReg(pl.LightningModule):
         inf_subj_latents = nn.Parameter(torch.randn((len(subj_idxs), self.latent_size),
                                                     dtype=torch.float32, device="cuda") * 1e-2, requires_grad=True)
         inf_aff_def_params = nn.Parameter(torch.zeros((len(subj_idxs), self.max_slices, 6),
-                                                         dtype=torch.float32, device="cuda"), requires_grad=True)
+                                                      dtype=torch.float32, device="cuda"), requires_grad=True)
         inf_intensity_scale_params = nn.Parameter(torch.randn((len(subj_idxs), self.max_slices, 1),
                                                               dtype=torch.float32, device="cuda") * 1e-3, requires_grad=True)
         opt_latent = torch.optim.Adam([inf_subj_latents], lr=1e-4)
@@ -442,6 +446,8 @@ class INR_AutoReg(pl.LightningModule):
                 metrics['dice_RV'].append(dice_per_class[3].item())
 
         log_name = f"{dset_str}_inf_metrics"
+        log_dir = self.log_path / log_name
+        log_dir.mkdir(exist_ok=True)
         window_size = 20
         if 'step' not in self.inference_metrics:
             steps = [sum(metrics['step'][i:i+window_size]) / len(metrics['step'][i:i+window_size]) for i in range(0, len(metrics['step']), window_size)]
@@ -463,6 +469,9 @@ class INR_AutoReg(pl.LightningModule):
                                           title=f"{k} metric over inference optimization",
                                           xname="Optimization steps")
             wandb.log({f'{log_name}/{str(subj_idxs)}_inf_metric_{k}': plot})
+
+            self.inference_metrics[k].to_csv(f'{k}_{str(subj_idxs)}.csv')
+            data_frame_to_line_plot(self.inference_metrics[k], self.inference_metrics['step'], k, str(subj_idxs))
         return inf_subj_latents, inf_aff_def_params, inf_intensity_scale_params
 
     def on_train_start(self) -> None:
@@ -597,6 +606,7 @@ class INR_AutoReg(pl.LightningModule):
         wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)),
                                     caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
         wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
+
 
         if self.current_epoch > 0 and self.current_epoch % (self.logging_rate * 5) == 0:
             images, _, _, _, _, full_indices, coord_max, coord_min, \

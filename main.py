@@ -1,6 +1,8 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple, List
+from datetime import datetime
 
 from lightning import Trainer
 from lightning.pytorch.loggers import WandbLogger
@@ -77,22 +79,29 @@ def main(data_dir, wandb_disabled="False"):
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
 
-    if params.use_conv:
-        model = INR_Conv(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                         max_slices=data_module.get_max_slices(), **params.__dict__)
-    else:
-        model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                            max_slices=data_module.get_max_slices(), **params.__dict__)
-
-    os.makedirs(r'./checkpoints', exist_ok=True)
+    model_path_parent = Path('trained_models')
+    model_path_parent.mkdir(exist_ok=True)
+    model_path = model_path_parent / datetime.now().strftime("%Y%m%d-%H%M%S")
+    model_path.mkdir(exist_ok=True)
+    checkpoint_path = model_path / 'checkpoints'
+    checkpoint_path.mkdir(exist_ok=True)
     checkpoint_callback = ModelCheckpoint(save_top_k=3,
                                           save_last=True,
-                                          dirpath=f'checkpoints/',
+                                          dirpath=str(checkpoint_path),
                                           verbose=True,
                                           monitor='val_metrics/dice_FG',
                                           mode='max',
                                           every_n_epochs=params.logging_rate,
                                           )
+    log_path = model_path / 'logs'
+    log_path.mkdir(exist_ok=True)
+    if params.use_conv:
+        model = INR_Conv(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
+                         max_slices=data_module.get_max_slices(), log_path=log_path, **params.__dict__)
+    else:
+        model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
+                            max_slices=data_module.get_max_slices(), log_path=log_path, **params.__dict__)
+
     trainer = Trainer(
         logger=logger,
         callbacks=[checkpoint_callback],
