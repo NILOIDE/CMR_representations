@@ -17,14 +17,15 @@ from model_conv import INR_Conv
 class Params:
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    logging_disabled: bool = True
+    logging_disabled: bool = False
+    logging_wandb_disabled: bool = True
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple = (0, 10, 100, 1000)
+    addit_log_epochs: Tuple = (1, 10, 100, 1000, 5000)
     num_workers: int = 8
-    batch_size: int = 4
-    num_coords: int = 25_000
+    batch_size: int = 8
+    num_coords: int = 75_000
     # Point spread function ------------------------------------------------------------
-    point_spread_size: int = 16
+    point_spread_size: int = 1
     point_spread_std: Tuple[float, ...] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
@@ -35,15 +36,13 @@ class Params:
     deform_hidden_size: int = 32
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Conv latent prediction -------------------------------------------------------------------
-    use_conv: bool = False
+    use_conv: bool = True
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_aff: float = 1e-2
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
-    weight_reg_deform: float = 0e-2
-    weight_reg_deform_lat: float = 0e-2
     weight_loss_deriv: float = 0e0
     weight_loss_hess: float = 0e0
     weight_loss_seg: float = 1e0
@@ -53,7 +52,8 @@ class Params:
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
     # Inference ----------
-    inf_max_epochs: int = 1000
+    inf_max_epochs: int = 300
+    inf_num_coords: int = 200_000
     inf_learning_rate: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
@@ -77,6 +77,7 @@ def main(data_dir):
                                 full_seq_dataset=params.use_conv,
                                 batch_size=params.batch_size,
                                 num_coords=params.num_coords,
+                                inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
 

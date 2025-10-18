@@ -32,6 +32,7 @@ class CMRDataModule(pl.LightningDataModule):
                  crop_around_heart=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
+                 inf_num_coords: int = 4000,
                  num_workers: int = 0):
         super().__init__()
         self.load_la_dir = load_la_dir
@@ -43,6 +44,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.replace_existing_processed = replace_existing_processed
         self.batch_size = batch_size
         self.num_coords = num_coords
+        self.inf_num_coords = inf_num_coords
         self.train_dset = None
         self.val_dset = None
         self.test_dset = None
@@ -79,10 +81,10 @@ class CMRDataModule(pl.LightningDataModule):
                                                 num_coords=self.num_coords, max_slices=self.get_max_slices(),
                                                 max_slice_shape=self.get_max_slice_shape())
         self.val_dset = self.test_dset_class([self.subject_data[i] for i in val_idxs],
-                                             num_coords=self.num_coords, max_slices=self.get_max_slices(),
+                                             num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
                                              max_slice_shape=self.get_max_slice_shape())
         self.test_dset = self.test_dset_class([self.subject_data[i] for i in test_idxs],
-                                              num_coords=self.num_coords, max_slices=self.get_max_slices(),
+                                              num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
                                               max_slice_shape=self.get_max_slice_shape())
         self.data_prepared = True
 
