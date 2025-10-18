@@ -7,7 +7,9 @@ import skimage
 import torch
 import torch.nn.functional as F
 import meshplot as mp
-from matplotlib import pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
+import matplotlib.pyplot as plt
 
 MEAN_SAX_LV_VALUE = 222.7909
 MAX_SAX_VALUE = 487.0
@@ -173,9 +175,9 @@ def params_to_mat(params, spacings, needs_flip):
     return affines
 
 
-def make_coordinate_tensor(shape):
+def make_coordinate_tensor(shape, device):
     """Make a coordinate tensor."""
-    coordinate_tensor = [torch.arange(0, i) for i in shape]
+    coordinate_tensor = [torch.arange(0, i, device=device) for i in shape]
     coordinate_tensor = torch.meshgrid(*coordinate_tensor, indexing="ij")
     coordinate_tensor = torch.stack(coordinate_tensor, dim=len(shape))
     return coordinate_tensor
@@ -183,7 +185,7 @@ def make_coordinate_tensor(shape):
 
 def make_masked_coordinate_tensor(mask):
     """Make a coordinate tensor."""
-    coordinate_tensor = make_coordinate_tensor(mask.shape)
+    coordinate_tensor = make_coordinate_tensor(mask.shape, device=mask.device)
     coordinate_tensor = coordinate_tensor.reshape([np.prod(mask.shape), len(mask.shape)])
     coordinate_tensor = coordinate_tensor[mask.flatten(), :]
     return coordinate_tensor
@@ -470,3 +472,48 @@ def create_meshplot_visualization(meshes, file_name, colors=None):
             plot.add_mesh(vertices, faces, c=color[:3])
     plot.save(file_name)
     return plot
+
+
+def video_array_to_file(array: Union[np.ndarray, torch.Tensor],
+                        file_path: Union[str, Path], video_duration: float = 2.):
+    if isinstance(file_path, Path):
+        file_path = str(file_path)
+    if "." in file_path[-4:]:
+        assert file_path[-4:] == ".mp4"
+    else:
+        file_path = file_path + ".mp4"
+    if isinstance(array, torch.Tensor):
+        array = array.numpy()
+
+    # Convert to uint8 range [0, 255]
+    array = (array * 255).astype(np.uint8)
+    T, C, H, W = array.shape
+    assert C in {1,3}, 'Channel dim should be of size 1 or 3'
+
+    # Define video codec and create VideoWriter
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # or 'avc1', 'H264'
+    fps = T // video_duration  # frames per second
+    out = cv2.VideoWriter(file_path, fourcc, fps, (W, H))
+    for t in range(T):
+        frame = array[t]
+        frame = np.transpose(frame, (1, 2, 0))
+        if C == 3:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        out.write(frame)
+    out.release()
+
+
+def data_frame_to_line_plot(df, x, metric_name, subj_idx, save_path):
+    assert df.shape[0] == len(x)
+    plt.figure(figsize=(10, 6))
+    # Plot each column
+    for column in df.columns:
+        plt.plot(list(x['step']), list(df[column]), label=column, marker='o')
+    plt.xlabel('Step')
+    plt.ylabel(metric_name)
+    plt.title(f'{str(subj_idx)}_{metric_name}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()  # Close the figure to free memory

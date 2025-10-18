@@ -105,23 +105,26 @@ class CardiacUKBB(Dataset):
 
 
 class CardiacUKBBValidation(CardiacUKBB):
-    def __init__(self, subj_paths, max_slices, max_slice_shape, num_coords=4000, **kwargs):
+    def __init__(self, subj_paths, max_slices, max_slice_shape, num_coords=4000, to_gpu=False, **kwargs):
         super().__init__(subj_paths, max_slices, max_slice_shape, num_coords, **kwargs)
         self.num_subjs = len(subj_paths)
         self.num_coords = num_coords
-        self.image_pad = torch.zeros((self.num_subjs, self.max_slices, *self.max_slice_shape), dtype=torch.float32)
-        self.image_dt = torch.zeros(self.image_pad.shape, dtype=torch.float32).unsqueeze(-1)
-        self.image_mask = torch.zeros(self.image_pad.shape, dtype=torch.bool)
-        self.seg = torch.zeros(self.image_pad.shape, dtype=torch.uint8)
-        self.la_gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool)
+        device = "cuda" if to_gpu else "cpu"
+        self.image_pad = torch.zeros((self.num_subjs, self.max_slices, *self.max_slice_shape), dtype=torch.float32, device=device)
+        self.image_dt = torch.zeros(self.image_pad.shape, dtype=torch.float32, device=device).unsqueeze(-1)
+        self.image_mask = torch.zeros(self.image_pad.shape, dtype=torch.bool, device=device)
+        self.seg = torch.zeros(self.image_pad.shape, dtype=torch.uint8, device=device)
+        self.la_gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool, device=device)
         self.non_padding_indices = [None]*self.num_subjs
-        self.coord_max = torch.zeros((self.num_subjs, 4), dtype=torch.float32)
-        self.coord_min = torch.zeros((self.num_subjs, 4), dtype=torch.float32)
-        self.aff_params_padded = torch.zeros((self.num_subjs, self.max_slices, 6), dtype=torch.float32)
-        self.spacings_padded = torch.zeros((self.num_subjs, self.max_slices, 3), dtype=torch.float32)
-        self.flippings_padded = torch.zeros((self.num_subjs, self.max_slices,), dtype=torch.bool)
-        self.num_subj_slices = torch.zeros((self.num_subjs,), dtype=torch.uint8)
+        self.coord_max = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
+        self.coord_min = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
+        self.aff_params_padded = torch.zeros((self.num_subjs, self.max_slices, 6), dtype=torch.float32, device=device)
+        self.spacings_padded = torch.zeros((self.num_subjs, self.max_slices, 3), dtype=torch.float32, device=device)
+        self.flippings_padded = torch.zeros((self.num_subjs, self.max_slices,), dtype=torch.bool, device=device)
+        self.num_subj_slices = torch.zeros((self.num_subjs,), dtype=torch.uint8, device=device)
         self.cache_data()
+        if to_gpu:
+            self.non_padding_indices = [i.cuda() for i in self.non_padding_indices]
 
     def cache_data(self):
         for i, path in enumerate(self.data_paths):
@@ -137,6 +140,11 @@ class CardiacUKBBValidation(CardiacUKBB):
                 self.image_mask[i, :S, :H, :W, :T] = torch.tensor(f['image_padded_mask'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.seg[i, :S, :H, :W, :T] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8).moveaxis(0, -1)
                 self.la_gt_available[i, :3, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
+                self.image_pad = self.image_pad[:,:,:H,:W]
+                self.image_dt = self.image_dt[:,:,:H,:W]
+                self.image_mask = self.image_mask[:,:,:H,:W]
+                self.seg = self.seg[:,:,:H,:W]
+                self.la_gt_available = self.la_gt_available[:,:,:H,:W]
                 # Get available non-padding indices in frame
                 non_padding_indices = make_masked_coordinate_tensor(self.image_mask[i])
                 # Add the time index to get the full volume index
@@ -152,6 +160,7 @@ class CardiacUKBBValidation(CardiacUKBB):
                 self.flippings_padded[i, :S] = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
+        idx=0
         # Load image and seg data
         (img, img_dt, seg, gt_avail,
          non_padding_indices, min_coords, max_coords, num_subj_slices,
@@ -180,7 +189,7 @@ class CardiacUKBBValidation(CardiacUKBB):
         gt_avail_sample = gt_avail[tuple(indices.T)]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
-        voxel_indices = np.concatenate((indices[:, 1:-1], np.zeros_like(indices[:, :1]), indices[:, -1:]), axis=-1)
+        voxel_indices = torch.concatenate((indices[:, 1:-1], torch.zeros_like(indices[:, :1]), indices[:, -1:]), axis=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         subj_idx = torch.tensor(idx, dtype=torch.long)
