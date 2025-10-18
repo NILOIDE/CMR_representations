@@ -72,8 +72,6 @@ class INR_AutoReg(pl.LightningModule):
         self.weight_reg_aff = kwargs["weight_reg_aff"]
         self.weight_reg_lat = kwargs["weight_reg_lat"]
         self.weight_intensity_scale = kwargs["weight_reg_int_scale"]
-        self.weight_reg_deform = kwargs["weight_reg_deform"]
-        self.weight_reg_deform_lat = kwargs["weight_reg_deform_lat"]
         self.weight_loss_deriv = kwargs["weight_loss_deriv"]
         self.supervise_deriv = self.weight_loss_deriv != 0
         self.weight_loss_hess = kwargs["weight_loss_hess"]
@@ -124,29 +122,12 @@ class INR_AutoReg(pl.LightningModule):
         loss_reg_int = nn.functional.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
         return loss_reg_int, {dict_name: loss_reg_int}
 
-    @staticmethod
-    def loss_reg_deform_inr_params(params, weight: float, dict_name='loss_reg_deform'):
-        loss = sum((p * p).sum() for p in params) * weight if weight else 0.0
-        return loss, {dict_name: loss}
-
-    @staticmethod
-    def loss_reg_deform_lat_params(params: torch.Tensor, weight: float, num_subj_slices: Optional[torch.Tensor] = None, dict_name='loss_reg_deform_lat'):
-        if num_subj_slices is not None:
-            non_pad_slices = torch.arange(0, params.shape[1], device=params.device).tile((params.shape[0],1)) < num_subj_slices[:, None]
-            params_ = params[non_pad_slices]
-        else:
-            params_ = params
-        loss = nn.functional.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
-        return loss, {dict_name: loss}
-
     def regularization_criterion(self, subj_idx: torch.Tensor) \
             -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         reg_inr_loss, reg_inr_dict = self.loss_reg_inr_params(self.canonical_inr.parameters(), self.weight_reg_inr)
         reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(self.aff_deform_params[subj_idx], self.weight_reg_aff)
         reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(self.subj_latents[subj_idx], self.weight_reg_lat)
         reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(self.intensity_scale_params[subj_idx], self.weight_intensity_scale)
-        # reg_c_deform_loss, reg_c_deform_dict = self.loss_reg_deform_inr_params(self.coord_deform_inr.parameters(), self.weight_reg_deform)
-        # reg_c_deform_lat_loss, reg_c_deform_lat_dict = self.loss_reg_deform_lat_params(self.deform_latents[subj_idx], self.weight_reg_deform_lat)
         reg_loss = reg_inr_loss + reg_aff_loss + reg_lat_loss + reg_int_scale_loss #+ reg_c_deform_loss + reg_c_deform_lat_loss
         reg_dict = {f"loss_reg": reg_loss,
                     **reg_inr_dict, **reg_lat_dict,
@@ -384,7 +365,7 @@ class INR_AutoReg(pl.LightningModule):
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             dset_str = 'train'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-            for i in range(0, min(len(dset), 1)):
+            for i in range(0, min(len(dset), 8)):
                 batch = tuple(b[None].cuda() for b in dset[i])
                 latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
                 self.log_images(i, dset, mode=dset_str,
@@ -397,7 +378,7 @@ class INR_AutoReg(pl.LightningModule):
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             dset_str = 'val'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-            for i in range(0, 1):
+            for i in range(0, len(dset)):
                 latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
                 optimized_latent, optimized_affine_def, optimized_intensity_def \
                     = self.inference(i, dset,

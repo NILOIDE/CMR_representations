@@ -18,7 +18,7 @@ class Params:
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
-    logging_wandb_disabled: bool = True
+    logging_wandb_disabled: bool = False
     logging_rate: int = 10_000
     addit_log_epochs: Tuple = (1, 10, 100, 1000, 5000)
     num_workers: int = 8
