@@ -17,8 +17,9 @@ from model_conv import INR_Conv
 class Params:
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    # check_val_every_n_epoch: int = 100
-    logging_rate: int = 1000
+    logging_disabled: bool = True
+    logging_rate: int = 10_000
+    addit_log_epochs: Tuple = (0, 10, 100, 1000)
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 25_000
@@ -63,9 +64,7 @@ class Params:
     pe_freq_scale: float = 1.0
 
 
-def main(data_dir, wandb_disabled="False"):
-    os.environ['WANDB_DISABLED'] = wandb_disabled
-
+def main(data_dir):
     # configure accelerator and devices
     accelerator = "gpu"
     devices = 1  # one GPU only
@@ -81,6 +80,7 @@ def main(data_dir, wandb_disabled="False"):
                                 num_workers=params.num_workers)
     data_module.prepare_data()
 
+    os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
 

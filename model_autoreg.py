@@ -30,7 +30,9 @@ class INR_AutoReg(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
         super(INR_AutoReg, self).__init__()
         self.automatic_optimization = False
+        self.logging_disabled = kwargs['logging_disabled']
         self.logging_rate = kwargs['logging_rate']
+        self.addit_log_epochs = kwargs['addit_log_epochs']
         self.inference_metrics = {}
         self.log_path = log_path
 
@@ -459,6 +461,8 @@ class INR_AutoReg(pl.LightningModule):
                 metrics['dice_MYO'].append(dice_per_class[2].item())
                 metrics['dice_RV'].append(dice_per_class[3].item())
 
+        if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
+            return inf_subj_latents, inf_aff_def_params, inf_intensity_scale_params
         log_name = f"{dset_str}_inf_metrics"
         log_dir = self.log_path / log_name
         log_dir.mkdir(exist_ok=True)
@@ -476,7 +480,6 @@ class INR_AutoReg(pl.LightningModule):
             else:
                 # Add column for this epoch
                 self.inference_metrics[k][f"{k}_{self.current_epoch}"] = v
-            # wandb.log({f'{log_name}/{str(subj_idxs)}_inf_table_{k}': wandb.Table(dataframe=self.inference_metrics[k])})
             plot = wandb.plot.line_series(xs=list(self.inference_metrics['step']),
                                           ys=[list(self.inference_metrics[k][i]) for i in list(self.inference_metrics[k].columns)],
                                           keys=list(self.inference_metrics[k].columns),
@@ -489,17 +492,14 @@ class INR_AutoReg(pl.LightningModule):
                                     save_path=str(log_dir / f"inf_lines_{str(subj_idxs[0])}_{k}.png"))
         return inf_subj_latents, inf_aff_def_params, inf_intensity_scale_params
 
-    def on_train_start(self) -> None:
-        self.on_train_epoch_end()
-
-    def on_train_epoch_end(self):
-        if (self.current_epoch+1) in {2, 100, 500} or (self.current_epoch+1) % self.logging_rate == 0:
+    def on_train_epoch_start(self):
+        if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             dset_str = 'train'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
             for i in range(0, min(len(dset), 8)):
                 self.log_images(i, dset, mode=dset_str,)
                 self.log_volume(i, dset, mode=dset_str,)
-        if (self.current_epoch+1) in {1, 1000} or (self.current_epoch+1) % self.logging_rate == 0:
+        if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             dset_str = 'val'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
             for i in range(0, len(dset)):
@@ -615,6 +615,9 @@ class INR_AutoReg(pl.LightningModule):
                 frame = (frame * 255).cpu().numpy().astype(np.uint8)
                 videos[s].append(frame)
         videos = [np.stack(v, 0) for v in videos if v]
+
+        if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
+            return
         save_dir = self.log_path / f"{mode}_slices" / str(subj_id)
         save_dir.parent.parent.mkdir(exist_ok=True)
         save_dir.parent.mkdir(exist_ok=True)
@@ -694,6 +697,8 @@ class INR_AutoReg(pl.LightningModule):
         ims = np.stack(ims, -1)
         segs = np.stack(segs, -1)
 
+        if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
+            return
         gt_images, _, gt_segs, _, full_indices, coord_max, coord_min, \
             aff_params_padded, spacings_padded, flippings_padded, _ = dataset.load_subject_data(subj_idx, 0)
         save_dir = self.log_path / f"{mode}_volumes" / str(subj_id)
