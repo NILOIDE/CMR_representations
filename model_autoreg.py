@@ -128,11 +128,10 @@ class INR_AutoReg(pl.LightningModule):
         reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(self.aff_deform_params[subj_idx], self.weight_reg_aff)
         reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(self.subj_latents[subj_idx], self.weight_reg_lat)
         reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(self.intensity_scale_params[subj_idx], self.weight_intensity_scale)
-        reg_loss = reg_inr_loss + reg_aff_loss + reg_lat_loss + reg_int_scale_loss #+ reg_c_deform_loss + reg_c_deform_lat_loss
+        reg_loss = reg_inr_loss + reg_aff_loss + reg_lat_loss + reg_int_scale_loss
         reg_dict = {f"loss_reg": reg_loss,
                     **reg_inr_dict, **reg_lat_dict,
                     **reg_aff_dict, **reg_int_scale_dict,
-                    # **reg_c_deform_dict, **reg_c_deform_lat_dict
                     }
         return reg_loss, reg_dict
 
@@ -440,7 +439,7 @@ class INR_AutoReg(pl.LightningModule):
             batch = (b[None].cuda() for b in instance_dset.__getitem__(0))
             (coords_voxel, img_values, img_dt_values, seg_gt, gt_avail,
              aff_params_padded, spacings_padded, needs_flip_padded,
-             subj_idx, slice_idx, min_coords, max_coords, num_subj_slices) = batch
+             subject_idx, slice_idx, min_coords, max_coords, num_subj_slices) = batch
 
             # Reset gradients (if optimizers exist for those params)
             if optimize_latent_params: opt_latent.zero_grad()
@@ -452,8 +451,8 @@ class INR_AutoReg(pl.LightningModule):
                                                                    spacings_padded, needs_flip_padded,
                                                                    slice_idx,
                                                                    min_coords, max_coords,
-                                                                   latent_params=inf_subj_latents[subj_idx],
-                                                                   aff_def_params=inf_aff_def_params[subj_idx],
+                                                                   latent_params=inf_subj_latents[subject_idx],
+                                                                   aff_def_params=inf_aff_def_params[subject_idx],
                                                                    point_spread_size=self.point_spread_size,
                                                                    point_spread_std=self.point_spread_std,
                                                                    return_deriv=self.supervise_deriv)
@@ -469,9 +468,9 @@ class INR_AutoReg(pl.LightningModule):
             if supervize_seg:
                 loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
             # Regularization losses
-            reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(inf_aff_def_params[subj_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
-            reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(inf_subj_latents[subj_idx], self.weight_reg_lat)
-            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(inf_intens_scale_params[subj_idx], self.weight_intensity_scale, num_subj_slices=num_subj_slices)
+            reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(inf_aff_def_params[subject_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
+            reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(inf_subj_latents[subject_idx], self.weight_reg_lat)
+            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(inf_intens_scale_params[subject_idx], self.weight_intensity_scale, num_subj_slices=num_subj_slices)
             loss_reg = reg_aff_loss + reg_lat_loss + reg_int_scale_loss
             reg_dict = {f"loss_reg": loss_reg,
                         **reg_aff_dict, **reg_lat_dict,
