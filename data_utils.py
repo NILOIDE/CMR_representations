@@ -93,12 +93,14 @@ def split_sax_into_slices(sax_path: str, save_dir: str, skip_exist=True) -> Tupl
     return slice_files, seg_slice_files
 
 
-def find_subjects(dataset_dir: str, prepr_dir: str) -> List[SubjectFiles]:
+def find_subjects(dataset_dir: str, prepr_dir: str, subj_num: int = 500) -> List[SubjectFiles]:
     dataset_dir = Path(dataset_dir)
     prepr_dir = Path(prepr_dir)
     assert dataset_dir.is_dir()
     subject_list = []
-    for subj_dir in tqdm(list(dataset_dir.iterdir()), desc="Iterating over subject directory"):
+    for i, subj_dir in tqdm(enumerate(dataset_dir.iterdir()), desc="Iterating over subject directory"):
+        if i > 500:
+            break
         sa_file = subj_dir / "sa.nii.gz"
         if not sa_file.exists() or not sa_file.is_file() or sa_file.stat().st_size == 0:
             continue
@@ -332,10 +334,13 @@ def download_substring_matching_subjects(keys: List[str],
 if __name__ == '__main__':
     # os.environ["KMP_DUPLICATE_LIB_OK"] = "1"
     # remote_subj_dir = "/vol/aimspace/projects/ukbb/cardiac/cardiac_segmentations/subjects/"
-    download_dir = "/home/nil/data/ukbb/cardiac/subjects"
+    # download_dir = "/home/nil/data/ukbb/cardiac/subjects"
+    download_dir = "/vol/miltank/projects/ukbb/data/cardiac/cardiac_segmentations/subjects"
     # password = input("Password:")
     # download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
-    subject_list = find_subjects(download_dir, prepr_dir="/home/nil/data/ukbb/cardiac/unaligned_subjects")
+    prepr_dir = "/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
+    # prepr_dir = "/home/nil/data/ukbb/cardiac/unaligned_subjects"
+    subject_list = find_subjects(download_dir, prepr_dir=prepr_dir)
     print(len(subject_list))
     # ims_, anns_ = [i for i, j, in ann_pairs], [j for i, j, in ann_pairs]
     # print(len(ann_pairs), "SAX subjects")
