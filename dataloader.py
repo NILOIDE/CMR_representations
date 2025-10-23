@@ -51,8 +51,8 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 100
-        self.num_val = 8
+        self.num_train = 400
+        self.num_val = 40
         self.num_test = 1
         self.dim_max = None
         self.num_workers = num_workers
