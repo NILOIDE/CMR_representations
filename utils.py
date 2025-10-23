@@ -6,7 +6,7 @@ import numpy as np
 import skimage
 import torch
 import torch.nn.functional as F
-import meshplot as mp
+# import meshplot as mp
 import matplotlib
 matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt

@@ -340,7 +340,7 @@ if __name__ == '__main__':
     # download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
     prepr_dir = "/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     # prepr_dir = "/home/nil/data/ukbb/cardiac/unaligned_subjects"
-    subject_list = find_subjects(download_dir, prepr_dir=prepr_dir, subj_num=1000)
+    subject_list = find_subjects(download_dir, prepr_dir=prepr_dir, subj_num=1200)
     print(len(subject_list))
     # ims_, anns_ = [i for i, j, in ann_pairs], [j for i, j, in ann_pairs]
     # print(len(ann_pairs), "SAX subjects")
