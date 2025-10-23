@@ -99,7 +99,7 @@ def find_subjects(dataset_dir: str, prepr_dir: str, subj_num: int = 500) -> List
     assert dataset_dir.is_dir()
     subject_list = []
     for i, subj_dir in tqdm(enumerate(dataset_dir.iterdir()), desc="Iterating over subject directory"):
-        if i > 500:
+        if i > subj_num:
             break
         sa_file = subj_dir / "sa.nii.gz"
         if not sa_file.exists() or not sa_file.is_file() or sa_file.stat().st_size == 0:
@@ -340,7 +340,7 @@ if __name__ == '__main__':
     # download_substring_matching_subjects([], download_dir, subjects_folder=remote_subj_dir, password=password)
     prepr_dir = "/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     # prepr_dir = "/home/nil/data/ukbb/cardiac/unaligned_subjects"
-    subject_list = find_subjects(download_dir, prepr_dir=prepr_dir)
+    subject_list = find_subjects(download_dir, prepr_dir=prepr_dir, subj_num=1000)
     print(len(subject_list))
     # ims_, anns_ = [i for i, j, in ann_pairs], [j for i, j, in ann_pairs]
     # print(len(ann_pairs), "SAX subjects")
