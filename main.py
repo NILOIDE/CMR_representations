@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List
 from datetime import datetime
+import tyro
 
 from lightning import Trainer
 from lightning.pytorch.loggers import WandbLogger
@@ -67,7 +68,6 @@ class Params:
 def main(data_dir):
 
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    import tyro
     # Pass arguments using the command line like:
     # python main.py --conv_channels 32 64 128 --no-use_conv
     # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
