@@ -146,7 +146,7 @@ class CardiacUKBBValidation(CardiacUKBB):
                 self.seg = self.seg[:,:,:H,:W]
                 self.la_gt_available = self.la_gt_available[:,:,:H,:W]
                 # Get available non-padding indices in frame
-                non_padding_indices = make_masked_coordinate_tensor(self.image_mask[i])
+                non_padding_indices = make_masked_coordinate_tensor(self.image_mask[i, ..., 0])
                 # Add the time index to get the full volume index
                 # full indices (slice, x, y, t)
                 self.non_padding_indices[i] = non_padding_indices
@@ -161,11 +161,13 @@ class CardiacUKBBValidation(CardiacUKBB):
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         idx=0
+        if frame is None:
+            frame = np.random.randint(0, 50)
         # Load image and seg data
         (img, img_dt, seg, gt_avail,
          non_padding_indices, min_coords, max_coords, num_subj_slices,
          aff_params_padded, spacings_padded, needs_flip_padded) = (
-            self.image_pad[idx], self.image_dt[idx], self.seg[idx], self.la_gt_available[idx],
+            self.image_pad[idx, :, :, :, frame], self.image_dt[idx, :, :, :, frame], self.seg[idx, :, :, :, frame], self.la_gt_available[idx, :, :, :, frame],
             self.non_padding_indices[idx], self.coord_min[idx], self.coord_max[idx], self.num_subj_slices[idx],
             self.aff_params_padded[idx], self.spacings_padded[idx], self.flippings_padded[idx])
 
@@ -189,7 +191,7 @@ class CardiacUKBBValidation(CardiacUKBB):
         gt_avail_sample = gt_avail[tuple(indices.T)]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
-        voxel_indices = torch.concatenate((indices[:, 1:-1], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=-1)
+        voxel_indices = torch.concatenate((indices[:, 1:], torch.zeros_like(indices[:, :1]), torch.full_like(indices[:, :1], frame)), dim=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
 
         subj_idx = torch.tensor(idx, dtype=torch.long)

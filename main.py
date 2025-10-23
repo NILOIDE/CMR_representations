@@ -23,6 +23,9 @@ class Params:
     logging_wandb_disabled: bool = False
     logging_rate: int = 10_000
     addit_log_epochs: Tuple[int, ...] = (1, 10, 100, 1000, 5000)
+    num_train: int = 100
+    num_val: int = 8
+    num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 30_000
@@ -85,6 +88,9 @@ def main():
     data_module = CMRDataModule(load_la_dir=params.data_dir,
                                 load_sa_dir=params.data_dir,
                                 preprocessed_store_path=params.preprocessed_h5_dir,
+                                num_train=params.num_train,
+                                num_val=params.num_val,
+                                num_test=params.num_test,
                                 full_seq_dataset=params.use_conv,
                                 batch_size=params.batch_size,
                                 num_coords=params.num_coords,

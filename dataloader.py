@@ -27,6 +27,9 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path: str,
+                 num_train: int = 100,
+                 num_val: int = 8,
+                 num_test: int = 1,
                  full_seq_dataset: bool = False,
                  replace_existing_processed=False,
                  crop_around_heart=True,
@@ -51,9 +54,9 @@ class CMRDataModule(pl.LightningDataModule):
         self._train_dataloader = None
         self._val_dataloader = None
         self._test_dataloader = None
-        self.num_train = 400
-        self.num_val = 40
-        self.num_test = 1
+        self.num_train = num_train
+        self.num_val = num_val
+        self.num_test = num_test
         self.dim_max = None
         self.num_workers = num_workers
         self.subject_data = []
