@@ -20,13 +20,13 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple = (1, 10, 100, 1000, 5000)
+    addit_log_epochs: Tuple[int, ...] = (1, 10, 100, 1000, 5000)
     num_workers: int = 8
     batch_size: int = 8
     num_coords: int = 75_000
     # Point spread function ------------------------------------------------------------
     point_spread_size: int = 1
-    point_spread_std: Tuple[float, ...] = (0.3, 0.3, 0.3, 0.3)
+    point_spread_std: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
@@ -46,7 +46,7 @@ class Params:
     weight_loss_deriv: float = 0e0
     weight_loss_hess: float = 0e0
     weight_loss_seg: float = 1e0
-    weight_seg_class: Tuple[float,...] = (1,2,4,3)  # Will be normalized
+    weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
@@ -58,19 +58,20 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: List[int] = (8,8,8,5,5)
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
     pe_anneal_max_iter: int = 50_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
 
 
 def main(data_dir):
-    # configure accelerator and devices
-    accelerator = "gpu"
-    devices = 1  # one GPU only
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-    params = Params()
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    import tyro
+    # Pass arguments using the command line like:
+    # python main.py --conv_channels 32 64 128 --no-use_conv
+    # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
+    params = tyro.cli(Params)
     data_module = CMRDataModule(load_la_dir=data_dir,
                                 load_sa_dir=data_dir,
                                 preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_crop",
@@ -111,8 +112,8 @@ def main(data_dir):
     trainer = Trainer(
         logger=logger,
         callbacks=[checkpoint_callback],
-        accelerator=accelerator,
-        devices=devices,
+        accelerator='gpu',
+        devices=1,
         max_epochs=params.max_epochs,
         # check_val_every_n_epoch=params.check_val_every_n_epoch,
         fast_dev_run=False,

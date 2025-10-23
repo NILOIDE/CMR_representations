@@ -521,7 +521,13 @@ class INR_AutoReg(pl.LightningModule):
             else:
                 # Add column for this epoch
                 self.inference_metrics[k][f"{k}_{self.current_epoch}"] = v
+
+            self.inference_metrics[k].to_csv(str(self.log_path / f'{k}_{str(subj_idx)}.csv'))
+            save_path = str(log_dir / f"inf_lines_{str(subj_idx)}_{k}.png")
+            data_frame_to_line_plot(self.inference_metrics[k], self.inference_metrics['step'], k, str(subj_idx),
+                                    save_path=save_path)
             if not self.logging_wandb_disabled:
+                wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}_plot': wandb.Image(save_path)})
                 plot = wandb.plot.line_series(xs=list(self.inference_metrics['step']),
                                               ys=[list(self.inference_metrics[k][i]) for i in list(self.inference_metrics[k].columns)],
                                               keys=list(self.inference_metrics[k].columns),
@@ -529,9 +535,6 @@ class INR_AutoReg(pl.LightningModule):
                                               xname="Optimization steps")
                 wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}': plot})
 
-            self.inference_metrics[k].to_csv(str(self.log_path / f'{k}_{str(subj_idx)}.csv'))
-            data_frame_to_line_plot(self.inference_metrics[k], self.inference_metrics['step'], k, str(subj_idx),
-                                    save_path=str(log_dir / f"inf_lines_{str(subj_idx)}_{k}.png"))
         return inf_subj_latents, inf_aff_def_params, inf_intens_scale_params
 
     @torch.no_grad()
