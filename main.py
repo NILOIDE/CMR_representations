@@ -61,10 +61,13 @@ class Params:
     pe_anneal_max_iter: int = 50_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
+    # Paths
     job_name: str = ''
+    preprocessed_store_path: str = r"/home/nil/data/ukbb/cardiac/unaligned_h5_crop"
+    data_dir: str = r"/home/nil/data/ukbb/cardiac/unaligned_subjects"
 
 
-def main(data_dir):
+def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     # Pass arguments using the command line like:
@@ -79,9 +82,9 @@ def main(data_dir):
     with open(str(model_path / "params.json"), "w") as f:
         json.dump(params.__dict__, f, indent=4)
 
-    data_module = CMRDataModule(load_la_dir=data_dir,
-                                load_sa_dir=data_dir,
-                                preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_crop",
+    data_module = CMRDataModule(load_la_dir=params.data_dir,
+                                load_sa_dir=params.data_dir,
+                                preprocessed_store_path=params.preprocessed_store_path,
                                 full_seq_dataset=params.use_conv,
                                 batch_size=params.batch_size,
                                 num_coords=params.num_coords,
@@ -129,4 +132,4 @@ def main(data_dir):
 
 
 if __name__ == '__main__':
-    main(r"/home/nil/data/ukbb/cardiac/unaligned_subjects")
+    main()
