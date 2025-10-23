@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,18 +24,15 @@ class Params:
     logging_rate: int = 10_000
     addit_log_epochs: Tuple[int, ...] = (1, 10, 100, 1000, 5000)
     num_workers: int = 8
-    batch_size: int = 8
-    num_coords: int = 75_000
+    batch_size: int = 4
+    num_coords: int = 30_000
     # Point spread function ------------------------------------------------------------
-    point_spread_size: int = 1
+    point_spread_size: int = 32
     point_spread_std: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
     latent_size: int = 128
-    deform_latent_size: int = 16
-    deform_num_hidden_layers: int = 1
-    deform_hidden_size: int = 32
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Conv latent prediction -------------------------------------------------------------------
     use_conv: bool = True
@@ -53,8 +51,8 @@ class Params:
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
     # Inference ----------
-    inf_max_epochs: int = 300
-    inf_num_coords: int = 200_000
+    inf_max_epochs: int = 500
+    inf_num_coords: int = 75_000
     inf_learning_rate: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
@@ -63,15 +61,24 @@ class Params:
     pe_anneal_max_iter: int = 50_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
+    job_name: str = ''
 
 
 def main(data_dir):
-
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
     # Pass arguments using the command line like:
     # python main.py --conv_channels 32 64 128 --no-use_conv
     # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
     params = tyro.cli(Params)
+
+    model_path_parent = Path('trained_models')
+    model_path_parent.mkdir(exist_ok=True)
+    model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + params.job_name)
+    model_path.mkdir(exist_ok=True)
+    with open(str(model_path / "params.json"), "w") as f:
+        json.dump(params.__dict__, f, indent=4)
+
     data_module = CMRDataModule(load_la_dir=data_dir,
                                 load_sa_dir=data_dir,
                                 preprocessed_store_path=r"/home/nil/data/ukbb/cardiac/unaligned_h5_crop",
@@ -86,10 +93,6 @@ def main(data_dir):
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
 
-    model_path_parent = Path('trained_models')
-    model_path_parent.mkdir(exist_ok=True)
-    model_path = model_path_parent / datetime.now().strftime("%Y%m%d-%H%M%S")
-    model_path.mkdir(exist_ok=True)
     checkpoint_path = model_path / 'checkpoints'
     checkpoint_path.mkdir(exist_ok=True)
     checkpoint_callback = ModelCheckpoint(save_top_k=3,
