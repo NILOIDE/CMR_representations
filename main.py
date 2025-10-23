@@ -63,8 +63,8 @@ class Params:
     pe_freq_scale: float = 1.0
     # Paths
     job_name: str = ''
-    preprocessed_store_path: str = r"/home/nil/data/ukbb/cardiac/unaligned_h5_crop"
-    data_dir: str = r"/home/nil/data/ukbb/cardiac/unaligned_subjects"
+    data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
+    preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
 
 
 def main():
@@ -84,7 +84,7 @@ def main():
 
     data_module = CMRDataModule(load_la_dir=params.data_dir,
                                 load_sa_dir=params.data_dir,
-                                preprocessed_store_path=params.preprocessed_store_path,
+                                preprocessed_store_path=params.preprocessed_h5_dir,
                                 full_seq_dataset=params.use_conv,
                                 batch_size=params.batch_size,
                                 num_coords=params.num_coords,
