@@ -22,7 +22,7 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (1, 10, 100, 1000, 5000)
+    addit_log_epochs: Tuple[int, ...] = (0, 10, 100, 1000, 5000)
     num_train: int = 100
     num_val: int = 8
     num_test: int = 1
@@ -30,8 +30,8 @@ class Params:
     batch_size: int = 4
     num_coords: int = 30_000
     # Point spread function ------------------------------------------------------------
-    point_spread_size: int = 32
-    point_spread_std: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
+    point_spread_size: int = 1
+    point_spread_std: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
