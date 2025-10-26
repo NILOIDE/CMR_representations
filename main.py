@@ -68,6 +68,7 @@ class Params:
     job_name: str = ''
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
+    trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
 
 
 def main():
@@ -78,7 +79,7 @@ def main():
     # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
     params = tyro.cli(Params)
 
-    model_path_parent = Path('trained_models')
+    model_path_parent = Path(params.trained_models_dir)
     model_path_parent.mkdir(exist_ok=True)
     model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + params.job_name)
     model_path.mkdir(exist_ok=True)
