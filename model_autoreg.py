@@ -751,7 +751,7 @@ class INR_AutoReg(pl.LightningModule):
         # Log to WANDB
         if not self.logging_wandb_disabled:
             # Log video slices
-            videos = [wandb.Video(c, fps=max(1, int(50 / video_duration))) for c in content]
+            videos = [wandb.Video(c, fps=max(1, int(50 / video_duration)), format='gif') for c in content]
             wandb.log({f"{mode}_volumes/subj_{subj_id}": videos}, step=self.current_epoch)
             # Log meshes
             meshes = process_segmentation_with_marching_cubes(segs[..., 0], level=0.5, step_size=1)
