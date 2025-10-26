@@ -650,7 +650,7 @@ class INR_AutoReg(pl.LightningModule):
             psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
             dices_strings = [f"Dice:" + f"{d[1].item():.2f}, " + f"{d[2].item():.2f}, " + f"{d[3].item():.2f}"
                              if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
-            wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)),
+            wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)), format='gif',
                                         caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
             wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
         # Save series to file as mp4
