@@ -28,7 +28,7 @@ class Params:
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
-    num_coords: int = 30_000
+    num_coords: int = 50_000
     # Point spread function ------------------------------------------------------------
     point_spread_size: int = 1
     point_spread_std: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
@@ -54,7 +54,7 @@ class Params:
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
     # Inference ----------
-    inf_max_epochs: int = 500
+    inf_max_epochs: int = 1500
     inf_num_coords: int = 75_000
     inf_learning_rate: float = 1e-3
     inf_learning_rate_aff: float = 1e-3

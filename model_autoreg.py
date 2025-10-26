@@ -380,11 +380,14 @@ class INR_AutoReg(pl.LightningModule):
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
             for i in range(0, len(dset)):
                 latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-                optimized_latent, optimized_affine_def, optimized_intensity_def \
+                optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
                     = self.inference(i, dset,
                                      latent_params=latent_params,
                                      aff_def_params=aff_def_params,
                                      intens_scale_params=intens_scale_params)
+                if not self.logging_wandb_disabled:
+                    wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+                    wandb.log({f'{dset_str}/inf_best_score': best_score})
                 self.log_images(i, dset, mode=dset_str,
                                 latent_params=optimized_latent,
                                 aff_def_params=optimized_affine_def,
@@ -429,6 +432,13 @@ class INR_AutoReg(pl.LightningModule):
         inf_subj_latents = nn.Parameter(latent_params, requires_grad=optimize_latent_params)
         inf_aff_def_params = nn.Parameter(aff_def_params, requires_grad=optimize_aff_def_params)
         inf_intens_scale_params = nn.Parameter(intens_scale_params, requires_grad=optimize_intens_scale_params)
+        best_inf_subj_latents = torch.clone(inf_subj_latents)
+        best_inf_aff_def_params = torch.clone(inf_aff_def_params)
+        best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
+        best_score = None
+        best_inf_step_num = 0
+        best_score_window_size = 20
+
         # Optimizers (None if we do not want to optimize)
         opt_latent = None if not optimize_latent_params else torch.optim.Adam([inf_subj_latents], lr=self.inf_lr)
         opt_affine_def = None if not optimize_aff_def_params else torch.optim.Adam([inf_aff_def_params], lr=self.inf_lr_aff)
@@ -499,7 +509,14 @@ class INR_AutoReg(pl.LightningModule):
             metrics['dice_LV'].append(dice_per_class[1].item())
             metrics['dice_MYO'].append(dice_per_class[2].item())
             metrics['dice_RV'].append(dice_per_class[3].item())
-
+            curr_score = np.mean(metrics['dice_FG'][-best_score_window_size:])
+            metrics['best_step'].append(curr_score)
+            if best_score is None or curr_score > best_score:
+                best_score = curr_score
+                best_inf_subj_latents = torch.clone(inf_subj_latents)
+                best_inf_aff_def_params = torch.clone(inf_aff_def_params)
+                best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
+                best_inf_step_num = i
         # Logging  -------------------------------------------------------------------------
         if self.logging_disabled:
             return inf_subj_latents, inf_aff_def_params, inf_intens_scale_params
@@ -535,7 +552,7 @@ class INR_AutoReg(pl.LightningModule):
                                               xname="Optimization steps")
                 wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}': plot})
 
-        return inf_subj_latents, inf_aff_def_params, inf_intens_scale_params
+        return best_inf_subj_latents, best_inf_aff_def_params, best_inf_intens_scale_params, best_inf_step_num, best_score
 
     @torch.no_grad()
     def log_images(self,
@@ -652,7 +669,7 @@ class INR_AutoReg(pl.LightningModule):
                              if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
             wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)), format='gif',
                                         caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
-            wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos}, step=self.current_epoch)
+            wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos})
         # Save series to file as mp4
         save_dir_vid = save_dir / "videos"
         save_dir_vid.parent.mkdir(exist_ok=True)
@@ -752,7 +769,7 @@ class INR_AutoReg(pl.LightningModule):
         if not self.logging_wandb_disabled:
             # Log video slices
             videos = [wandb.Video(c, fps=max(1, int(50 / video_duration)), format='gif') for c in content]
-            wandb.log({f"{mode}_volumes/subj_{subj_id}": videos}, step=self.current_epoch)
+            wandb.log({f"{mode}_volumes/subj_{subj_id}": videos})
             # Log meshes
             meshes = process_segmentation_with_marching_cubes(segs[..., 0], level=0.5, step_size=1)
             if not meshes:
@@ -763,17 +780,17 @@ class INR_AutoReg(pl.LightningModule):
                 meshes = process_segmentation_with_marching_cubes(a, level=0.5, step_size=1)
             import tempfile
             for i in range(5):
+                save_dir = self.log_path / f"temp_mesh_files/{subj_id}"
+                save_dir.parent.mkdir(exist_ok=True)
+                save_dir.mkdir(exist_ok=True)
                 try:
-                    save_dir = Path(f"temp_mesh_files/{subj_id}")
-                    save_dir.parent.mkdir(exist_ok=True)
-                    save_dir.mkdir(exist_ok=True)
                     with tempfile.NamedTemporaryFile(dir=str(save_dir.absolute()), suffix='.html', delete=False) as f:
                         plot = create_meshplot_visualization(meshes, f.name)
                         temp_file_path = f.name
                         with open(f.name, 'r') as html_file:
                             wandb.log({f"{mode}_mesh/subj_{subj_id}": wandb.Html(html_file.read())})
-                    shutil.rmtree(save_dir.parent)
                     break
                 except Exception as e:
                     print("Error while logging mesh:")
                     traceback.print_exc()
+                shutil.rmtree(save_dir.parent, ignore_errors=True)
