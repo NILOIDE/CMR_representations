@@ -78,6 +78,7 @@ def main():
     # python main.py --conv_channels 32 64 128 --no-use_conv
     # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
     params = tyro.cli(Params)
+    print(params)
 
     model_path_parent = Path(params.trained_models_dir)
     model_path_parent.mkdir(exist_ok=True)
