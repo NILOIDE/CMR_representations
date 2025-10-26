@@ -85,6 +85,7 @@ def main():
     model_path.mkdir(exist_ok=True)
     with open(str(model_path / "params.json"), "w") as f:
         json.dump(params.__dict__, f, indent=4)
+    print('Model path:', model_path)
 
     data_module = CMRDataModule(load_la_dir=params.data_dir,
                                 load_sa_dir=params.data_dir,
