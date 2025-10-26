@@ -12,6 +12,7 @@ import torch
 import tqdm
 import pandas as pd
 from torch import nn
+from torchvision.utils import save_image
 import torch.nn.functional as F
 import lightning.pytorch as pl
 import wandb
@@ -420,7 +421,6 @@ class INR_AutoReg(pl.LightningModule):
         # instance_dloader = DataLoader(instance_dset, shuffle=False, num_workers=0)
         # Save to disk
         if not self.logging_disabled:
-            from torchvision.utils import save_image
             save_path = self.log_path / 'inf_sanity_check' / f"{self.current_epoch}_{subj_idx}_inf.png"
             save_path.parent.parent.mkdir(exist_ok=True)
             save_path.parent.mkdir(exist_ok=True)
