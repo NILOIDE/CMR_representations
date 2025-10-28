@@ -107,14 +107,10 @@ def main():
 
     checkpoint_path = model_path / 'checkpoints'
     checkpoint_path.mkdir(exist_ok=True)
-    checkpoint_callback = ModelCheckpoint(save_top_k=3,
-                                          save_last=True,
-                                          dirpath=str(checkpoint_path),
-                                          verbose=True,
-                                          monitor='val_metrics/dice_FG',
-                                          mode='max',
-                                          every_n_epochs=params.logging_rate,
-                                          )
+    checkpoint_callback = ModelCheckpoint(dirpath=str(checkpoint_path),
+                                          filename='epoch-{epoch:06d}',
+                                          every_n_epochs=params.logging_rate//2,
+                                          save_top_k=-1)
     log_path = model_path / 'logs'
     log_path.mkdir(exist_ok=True)
     if params.use_conv:
