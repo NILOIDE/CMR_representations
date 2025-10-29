@@ -424,7 +424,7 @@ class INR_AutoReg(pl.LightningModule):
         # instance_dloader = DataLoader(instance_dset, shuffle=False, num_workers=0)
         # Save to disk
         if not self.logging_disabled:
-            save_path = self.log_path / 'inf_sanity_check' / f"{self.current_epoch}_{subj_idx}_inf.png"
+            save_path = self.log_path / 'inf_sanity_check' / f"{self.current_epoch:06d}_{subj_idx}_inf.png"
             save_path.parent.parent.mkdir(exist_ok=True)
             save_path.parent.mkdir(exist_ok=True)
             save_image(instance_dset.image_pad[0, :6, ..., 0].reshape(-1, instance_dset.image_pad.shape[-3]), str(save_path))
@@ -534,10 +534,10 @@ class INR_AutoReg(pl.LightningModule):
             v = [sum(v[i:i+window_size]) / len(v[i:i+window_size]) for i in range(0, len(v), window_size)]
             if k not in self.inference_metrics:
                 # If no previous dataframe, create dataframe with column for this epoch
-                self.inference_metrics[k] = pd.DataFrame(v, columns=[f"{k}_{self.current_epoch}"])
+                self.inference_metrics[k] = pd.DataFrame(v, columns=[f"{k}_{self.current_epoch:06d}"])
             else:
                 # Add column for this epoch
-                self.inference_metrics[k][f"{k}_{self.current_epoch}"] = v
+                self.inference_metrics[k][f"{k}_{self.current_epoch:06d}"] = v
 
             self.inference_metrics[k].to_csv(str(self.log_path / f'{k}_{str(subj_idx)}.csv'))
             save_path = str(log_dir / f"inf_lines_{str(subj_idx)}_{k}.png")
@@ -661,7 +661,7 @@ class INR_AutoReg(pl.LightningModule):
         ssims = [np.mean(i) for i in ssims if i]
         dices = [torch.stack(d, 0).mean(0) for i, d in enumerate(dices) if d]
         metrics = {"Dice": dices, "PSNR": psnrs, "SSIM": ssims}
-        pd.DataFrame(metrics).to_csv(str(self.log_path / f"epoch_{self.current_epoch}_subj_{subj_idx}.csv"), index=False)
+        pd.DataFrame(metrics).to_csv(str(self.log_path / f"epoch_{self.current_epoch:06d}_subj_{subj_idx}.csv"), index=False)
         # Save to WANDB
         if not self.logging_wandb_disabled:
             psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
@@ -675,7 +675,7 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_vid.parent.mkdir(exist_ok=True)
         save_dir_vid.mkdir(exist_ok=True)
         for i, v in enumerate(videos):
-            video_array_to_file(v, save_dir_vid / f"epoch_{self.current_epoch}_slice_{i}.mp4")
+            video_array_to_file(v, save_dir_vid / f"epoch_{self.current_epoch:06d}_slice_{i:02d}.mp4")
 
         # Save series to file as nifti
         images, _, _, _, full_indices, coord_max, coord_min, \
@@ -691,7 +691,7 @@ class INR_AutoReg(pl.LightningModule):
             aff = aff[0].cpu().numpy()
             v = (v > 100).astype(np.uint8)
             v = np.moveaxis(v[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"epoch_{self.current_epoch}_slice_{i}.nii.gz"), v[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif / f"epoch_{self.current_epoch:06d}_slice_{i:02d}.nii.gz"), v[:,:,None], aff)
 
     @torch.no_grad()
     def log_volume(self,
@@ -763,7 +763,7 @@ class INR_AutoReg(pl.LightningModule):
         content = [np.moveaxis(c, -1, 0) for c in content]
         # Save series to file as mp4
         for v, i in zip(content, slice_indices):
-            video_array_to_file(v, save_dir / f"epoch_{self.current_epoch}_subj_{subj_idx}_slice_{i}-{res[2]}.mp4",
+            video_array_to_file(v, save_dir / f"epoch_{self.current_epoch:06d}_subj_{subj_idx}_slice_{i:02d}-{res[2]}.mp4",
                                 video_duration=2.0)
         # Log to WANDB
         if not self.logging_wandb_disabled:
