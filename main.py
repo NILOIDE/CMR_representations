@@ -38,7 +38,7 @@ class Params:
     latent_size: int = 128
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Conv latent prediction -------------------------------------------------------------------
-    use_conv: bool = True
+    use_conv: bool = False
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
