@@ -565,16 +565,18 @@ class INR_AutoReg(pl.LightningModule):
                    mode="train"):
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
+        gt_ims = []
         videos = [[] for _ in range(20)]
         preds = [[] for _ in range(20)]
         segs = [[] for _ in range(20)]
         psnrs = [[] for _ in range(20)]
         ssims = [[] for _ in range(20)]
         dices = [[] for _ in range(20)]
-        for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging {mode} slices for subject {subj_idx} (UKBB id: {subj_id})"):
+        for t in tqdm.tqdm(range(0, 50), desc=f"Logging {mode} slices for subject {subj_idx} (UKBB id: {subj_id})"):
             images, images_dt, seg_argmax, _, full_indices, coord_min, coord_max, \
                 aff_params_padded, spacings_padded, flippings_padded, num_subj_slices \
                 = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, t))
+            gt_ims.append((images * 255).cpu().numpy().astype(np.uint8))
             images, num_subj_slices = images.cuda()[None], num_subj_slices.cuda()[None]
             B, S, H, W = images.shape
             images_dt, seg_argmax = images_dt[...,-1].cuda()[None], seg_argmax.cuda()[None]
@@ -610,11 +612,11 @@ class INR_AutoReg(pl.LightningModule):
                 ssim_metric = kornia.metrics.ssim(pred_img[None, None], images[:,s,None,...], window_size=11, max_val=1.0)
                 ssims[s].append(ssim_metric.mean().detach().cpu().item())
                 pred = pred_img.clip(0.0, 1.0)
-                pred = (pred * 255).cpu().numpy()
+                pred = (pred * 255).cpu().numpy().astype(np.uint8)
                 preds[s].append(pred)
                 pred_seg = pred_seg_.reshape(H, W, pred_seg_.shape[-1])
                 pred_seg_argmax = pred_seg.argmax(-1)
-                segs[s].append(pred_seg_argmax)
+                segs[s].append(pred_seg_argmax.numpy().astype(np.uint8))
                 seg_gt = to_1hot(seg_argmax[0,s].reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 pred_seg_1hot = to_1hot(pred_seg_argmax.reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 dice = 1 - self.seg_loss(pred_seg_1hot[None].moveaxis(-1,1), seg_gt[None].moveaxis(-1,1)).mean(0).squeeze()
@@ -652,10 +654,8 @@ class INR_AutoReg(pl.LightningModule):
 
         if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
             return
-        save_dir = self.log_path / f"{mode}_slices" / str(subj_id)
-        save_dir.parent.parent.mkdir(exist_ok=True)
-        save_dir.parent.mkdir(exist_ok=True)
-        save_dir.mkdir(exist_ok=True)
+        save_dir = self.log_path / f"{mode}_slices" / str(subj_id) / f"epoch_{self.current_epoch:06d}"
+        save_dir.mkdir(exist_ok=True, parents=True)
         # Save metrics to file
         psnrs = [np.mean(i) for i in psnrs if i]
         ssims = [np.mean(i) for i in ssims if i]
@@ -675,23 +675,32 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_vid.parent.mkdir(exist_ok=True)
         save_dir_vid.mkdir(exist_ok=True)
         for i, v in enumerate(videos):
-            video_array_to_file(v, save_dir_vid / f"epoch_{self.current_epoch:06d}_slice_{i:02d}.mp4")
+            video_array_to_file(v, save_dir_vid / f"slice_{i:02d}.mp4")
 
         # Save series to file as nifti
         images, _, _, _, full_indices, coord_max, coord_min, \
             aff_params_padded, spacings_padded, flippings_padded, _ \
-                = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))
+            = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))
         save_dir_nif = save_dir / "niftis"
-        save_dir_nif.parent.mkdir(exist_ok=True)
-        save_dir_nif.mkdir(exist_ok=True)
+        save_dir_nif.mkdir(exist_ok=True, parents=True)
+        save_dir_nif_og = save_dir_nif / 'original'
+        save_dir_nif_og.mkdir(exist_ok=True)
         preds = [np.stack(v, 0) for v in preds if v]
-        for i, v in enumerate(preds):
+        segs = [np.stack(v, 0) for v in segs if v]
+        gt_ims = [np.stack(v, 0) for v in gt_ims if v]
+        for i, (gt, v, s) in enumerate(zip(gt_ims, preds, segs)):
             aff_params = aff_params_padded[i][None] + aff_def_params[0, i].cpu()
             aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
             aff = aff[0].cpu().numpy()
-            v = (v > 100).astype(np.uint8)
+            v = v.astype(np.uint8)
             v = np.moveaxis(v[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"epoch_{self.current_epoch:06d}_slice_{i:02d}.nii.gz"), v[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v[:,:,None], aff)
+            s = s.astype(np.uint8)
+            s = np.moveaxis(s[..., None], 0, -1)
+            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), s[:,:,None], aff)
+            gt = gt.astype(np.uint8)
+            gt = np.moveaxis(gt[..., None], 0, -1)
+            array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt[:,:,None], aff)
 
     @torch.no_grad()
     def log_volume(self,
