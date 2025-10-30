@@ -153,7 +153,7 @@ class INR_AutoReg(pl.LightningModule):
         #     aff_def_params.requires_grad = True
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 slice_idx, min_coords, max_coords, aff_def_params)
-        seg_pred, values_pred  = self.forward_inr(world_coords, latent_params)
+        seg_pred, values_pred = self.forward_inr(world_coords, latent_params)
         values_pred_d = None
         if return_deriv:
             values_pred_d = torch.autograd.grad(values_pred, world_coords, grad_outputs=torch.ones_like(values_pred),
@@ -365,7 +365,8 @@ class INR_AutoReg(pl.LightningModule):
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             dset_str = 'train'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-            for i in range(0, min(len(dset), 8)):
+            # for i in range(0, min(len(dset), 8)):
+            for i in range(0, len(dset)):
                 batch = tuple(b[None].cuda() for b in dset[i])
                 latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
                 self.log_images(i, dset, mode=dset_str,
@@ -488,7 +489,6 @@ class INR_AutoReg(pl.LightningModule):
             # Recon derivative loss
             loss_dt = torch.tensor((0.0,), device=loss_recon.device)
             if self.supervise_deriv:
-                assert False
                 loss_dt = self.psnr_loss(values_pred_d[...,-1:], img_dt_values*50) * self.weight_loss_deriv
             loss = loss_recon + loss_seg + loss_reg + loss_dt
             # Backprop only image-based losses and regularization losses (we assume we don't have seg GT)
