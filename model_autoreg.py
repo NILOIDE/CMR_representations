@@ -697,7 +697,7 @@ class INR_AutoReg(pl.LightningModule):
             array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v[:,:,None], aff)
             s = s.astype(np.uint8)
             s = np.moveaxis(s[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), s[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s[:,:,None], aff)
             gt = gt.astype(np.uint8)
             gt = np.moveaxis(gt[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt[:,:,None], aff)
