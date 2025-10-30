@@ -565,7 +565,7 @@ class INR_AutoReg(pl.LightningModule):
                    mode="train"):
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
-        gt_ims = []
+        gt_ims = [[] for _ in range(20)]
         videos = [[] for _ in range(20)]
         preds = [[] for _ in range(20)]
         segs = [[] for _ in range(20)]
@@ -576,7 +576,6 @@ class INR_AutoReg(pl.LightningModule):
             images, images_dt, seg_argmax, _, full_indices, coord_min, coord_max, \
                 aff_params_padded, spacings_padded, flippings_padded, num_subj_slices \
                 = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, t))
-            gt_ims.append((images * 255).cpu().numpy().astype(np.uint8))
             images, num_subj_slices = images.cuda()[None], num_subj_slices.cuda()[None]
             B, S, H, W = images.shape
             images_dt, seg_argmax = images_dt[...,-1].cuda()[None], seg_argmax.cuda()[None]
@@ -587,6 +586,7 @@ class INR_AutoReg(pl.LightningModule):
             voxel_indices = torch.cat((full_indices[..., 1:3], torch.zeros_like(full_indices[..., :1]),
                                        torch.full_like(full_indices[..., :1], t)), dim=-1).float()
             for s in range(num_subj_slices.item()):
+                gt_ims[s].append((images[0,s] * 255).cpu().numpy().astype(np.uint8))
                 voxel_indices_ = voxel_indices[s, ..., :].reshape(1, -1, 4)
                 slice_idx_ = slice_idx[s, ..., :].reshape(1, -1, 1)
                 with torch.enable_grad():
@@ -616,7 +616,7 @@ class INR_AutoReg(pl.LightningModule):
                 preds[s].append(pred)
                 pred_seg = pred_seg_.reshape(H, W, pred_seg_.shape[-1])
                 pred_seg_argmax = pred_seg.argmax(-1)
-                segs[s].append(pred_seg_argmax.numpy().astype(np.uint8))
+                segs[s].append(pred_seg_argmax.cpu().numpy().astype(np.uint8))
                 seg_gt = to_1hot(seg_argmax[0,s].reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 pred_seg_1hot = to_1hot(pred_seg_argmax.reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 dice = 1 - self.seg_loss(pred_seg_1hot[None].moveaxis(-1,1), seg_gt[None].moveaxis(-1,1)).mean(0).squeeze()
