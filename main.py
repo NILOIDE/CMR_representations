@@ -17,19 +17,21 @@ from model_conv import INR_Conv
 
 @dataclass
 class Params:
+    """" Default params """
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (0, 10, 100, 1000, 5000)
+    addit_log_epochs: Tuple[int, ...] = (0, 10, 100, 500, 1000, 5000,)
     num_train: int = 100
-    num_val: int = 8
+    num_val: int = 10
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 50_000
     # Point spread function ------------------------------------------------------------
+    point_spread_start_epoch: int = 20_000
     point_spread_size: int = 1
     point_spread_std: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
@@ -46,9 +48,14 @@ class Params:
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
-    weight_loss_hess: float = 0e0
+    # Segmentation ----------------------------------------------------------------
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
+    # Registration ---------------------------------------------------------------
+    regist_task_start_epoch: int = 0
+    weight_loss_regist_recon: float = 1e0
+    weight_loss_regist_seg: float = 1e0
+    weight_loss_regist_reg: float = 0e-4
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
@@ -60,7 +67,7 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (6,6,6,5,5)
     pe_anneal_max_iter: int = 50_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0

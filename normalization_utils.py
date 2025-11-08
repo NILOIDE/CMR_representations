@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -5,7 +6,8 @@ import torch
 from typing import List, Optional, Tuple
 
 from data_utils import array_to_nifti
-from geo_utils import get_image_plane_from_affine, plane_intersection, plane_line_intersection, rotation_matrix
+from geo_utils import get_image_plane_from_affine, plane_intersection, plane_line_intersection, rotation_matrix, \
+    get_image_plane_from_array, angle_between_vectors
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import get_center_coord, to_gif
 
@@ -196,66 +198,158 @@ def find_basal_apical_from_sa_segmentation(segs: List[torch.Tensor],
     return lv_basal_slice, lv_apex_slice
 
 
-def normalize_slice_orientation(affines: List[torch.Tensor], segs: Optional[List[torch.Tensor]] = None, debug=False) -> List[torch.Tensor]:
+def normalize_slice_orientation(affines: List[torch.Tensor],
+                                segs: Optional[List[torch.Tensor]] = None,
+                                myo_search_step_size: int = 1,
+                                myo_search_num_samples: int = 100,
+                                use_sa_normal_as_la: bool = True,
+                                debug=False) -> List[torch.Tensor]:
     """ We find landmarks in ED frame, first 3 slices are LA slices """
     lv_basal_slice, lv_apex_slice = find_basal_apical_from_sa_segmentation(segs[3:])
     lv_basal_slice, lv_apex_slice = 3+lv_basal_slice, 3+lv_apex_slice
     # Find long-axis (la) vector and where it intersects with middle short-axis (sa) slice. LV=Left ventricle, RV=Right ventricle
     lv_midventr_slice = (lv_apex_slice + lv_basal_slice) // 2
 
-    # Find LV center on slices above and below the mid-ventricular slice to define LA vector
-    above_midventr_lv_center = get_center_coord(segs[lv_midventr_slice-1][..., 0] == 1)
-    above_midventr_lv_center_aug = torch.cat((above_midventr_lv_center, torch.tensor((0,)), torch.tensor((1,))), dim=0)
-    w_above_midventr_center_aug = affines[lv_midventr_slice-1] @ above_midventr_lv_center_aug
-    below_midventr_lv_center = get_center_coord(segs[lv_midventr_slice+1][..., 0] == 1)
-    below_midventr_lv_center_aug = torch.cat((below_midventr_lv_center, torch.tensor((0,)), torch.tensor((1,))), dim=0)
-    w_below_midventr_lv_center_aug = affines[lv_midventr_slice+1] @ below_midventr_lv_center_aug
-    la_vector_points = (w_above_midventr_center_aug[:3], w_below_midventr_lv_center_aug[:3])
+    affines = [a.double() for a in affines]
+    plane_equations = get_image_plane_from_affine(torch.stack(affines)).double()
 
-    # Find LV center and RV center on the mid-ventricular slice to define LV-RV vector
-    w_lv_midway_center = (w_above_midventr_center_aug[:3] + w_below_midventr_lv_center_aug[:3]) / 2
-    rv_midway_center = get_center_coord(segs[lv_midventr_slice][..., 0] == 3)
-    rv_midway_center_aug = torch.cat((rv_midway_center, torch.tensor((0,)), torch.tensor((1,))), dim=0)
-    w_rv_midway_center_aug = affines[lv_midventr_slice] @ rv_midway_center_aug
-    lv_rv_vector_points = (w_lv_midway_center[:3], w_rv_midway_center_aug[:3])
+    lv_rv_vector_points = plane_intersection(plane_equations[2][None], plane_equations[lv_midventr_slice][None])[0].double()
+    if use_sa_normal_as_la:
+        # Use SA normal as long axis vector
+        la_vector = plane_equations[lv_midventr_slice][:3]
+        la_2ch4ch_intersection = plane_intersection(plane_equations[2][None], plane_equations[0][None])[0].double()
+        la_point = plane_line_intersection(la_2ch4ch_intersection[1], la_2ch4ch_intersection[0], plane_equations[lv_midventr_slice])
+        la_vector_points = torch.stack((la_point, la_point + la_vector))
+    else:
+        # Use  2ch and 4ch intersection as long axis vector
+        la_vector_points = plane_intersection(plane_equations[2][None], plane_equations[0][None])[0].double()
+        la_vector = la_vector_points[1] - la_vector_points[0]
 
-    w_hear_center = (lv_rv_vector_points[0] + lv_rv_vector_points[1]) / 2
-
-    # plane_equations = get_image_plane_from_affine(torch.stack(affines))
-    # la_vector_points = plane_intersection(plane_equations[2][None], plane_equations[0][None])[0]
-    la_vector = la_vector_points[1] - la_vector_points[0]
-    # lv_rv_vector_points = plane_intersection(plane_equations[2][None], plane_equations[lv_midventr_slice][None])[0]
-    lv_rv_vector = lv_rv_vector_points[1] - lv_rv_vector_points[0]
-    # w_lv_midway_center = plane_line_intersection(la_vector_points[1], la_vector_points[0],
-    #                                              plane_equations[lv_midventr_slice])
     # Calculate affine matrix that aligns LA vector with z axis
     z_vector = torch.tensor((0, 0, 1), dtype=la_vector.dtype)
-    la_to_z_angle = torch.arccos(torch.dot(la_vector / la_vector.norm(), z_vector).clip(-1., 1.))  # the angle to z axis
+    la_to_z_angle = angle_between_vectors(z_vector, la_vector)  # the angle to z axis
+    # torch.arccos(torch.dot(la_vector / la_vector.norm(), z_vector).clip(-1., 1.))
     la_rot_axis = torch.cross(z_vector, la_vector)
     la_rot_axis = la_rot_axis / la_rot_axis.norm()
     rot_la = rotation_matrix(la_to_z_angle, la_rot_axis)
-    # Calculate affine matrix that aligns LV-RV vector with y axis
-    y_vector = torch.tensor((0, 1, 0), dtype=lv_rv_vector.dtype)
-    rv_la_cross_vector = torch.cross(la_vector, lv_rv_vector) @ rot_la
-    rv_la_cross_vector = rv_la_cross_vector / rv_la_cross_vector.norm()
-    la_to_y_angle = torch.arccos(
-        torch.dot(rv_la_cross_vector / rv_la_cross_vector.norm(), y_vector).clip(-1., 1.))  # the angle to y axis
-    rot_rv = rotation_matrix(la_to_y_angle, z_vector)
+
+    # Point where LA vector crosses SA mid-ventr plane is LV center
+    w_lv_center = plane_line_intersection(la_vector_points[1], la_vector_points[0],
+                                                 plane_equations[lv_midventr_slice])
+    w_lv_center_aug = torch.cat((w_lv_center, torch.ones_like(w_lv_center[:1])), dim=-1)[None]
+    i_lv_center_aug = (torch.linalg.inv(affines[lv_midventr_slice]) @ w_lv_center_aug.T).T
+    i_lv_center = i_lv_center_aug[:, :2]
+    lv_rv_vector_points_aug = torch.cat((lv_rv_vector_points, torch.ones_like(lv_rv_vector_points[:,:1])), dim=-1)
+    lv_rv_vector_points_image_aug = (torch.linalg.inv(affines[lv_midventr_slice]) @ lv_rv_vector_points_aug.T).T
+    assert lv_rv_vector_points_image_aug[:,2].abs().sum() < 1e-4,  "z coord in image coords should be near 0.0"
+    assert (lv_rv_vector_points_image_aug[:,3] - 1.).abs().sum() < 1e-5,  "Aug corner should be near 1.0"
+    # In order to find the heart center, we sample segmentatin along the 4ch intersection line on the SA mid-ventr slice
+    # Then find which direction leads towards the RV, and find the center of the MYO seg class between LV and RV blobs
+    lv_rv_vector_points_image = lv_rv_vector_points_image_aug[:, :2]
+    lv_rv_vector_image = lv_rv_vector_points_image[1] - lv_rv_vector_points_image[0]
+    if segs is None:
+        raise ValueError
+    else:
+        lv_rv_vector_image_step_size = lv_rv_vector_image / lv_rv_vector_image.norm() * myo_search_step_size
+        lv_rv_vector_image_steps = lv_rv_vector_image_step_size[None].tile(myo_search_num_samples, 1)
+        lv_rv_vector_image_steps *= torch.arange(-myo_search_num_samples // 2, myo_search_num_samples // 2)[:, None]
+        lv_myo_sample_points = i_lv_center.tile(myo_search_num_samples, 1) + lv_rv_vector_image_steps
+        lv_myo_sample_points_norm = (lv_myo_sample_points / torch.tensor(segs[lv_midventr_slice].shape[:2]) * 2 - 1)
+        lv_sample_segs = torch.nn.functional.grid_sample(segs[lv_midventr_slice][None,None,...,0].double(),
+                                                             lv_myo_sample_points_norm[None,None].flip(-1),
+                                                             mode='nearest', align_corners=True).to(torch.uint8).squeeze()
+        if not (lv_sample_segs==3).any():
+            raise ValueError
+        rv_center = torch.where(lv_sample_segs==3)[0].median()
+        if rv_center >= myo_search_num_samples//2:
+            rv_to_lv_samples = lv_sample_segs[myo_search_num_samples//2:]
+            myo_center_along_line = torch.where(rv_to_lv_samples==2)[0].median() + myo_search_num_samples//2
+        else:
+            rv_to_lv_samples = lv_sample_segs[:myo_search_num_samples//2]
+            myo_center_along_line = torch.where(rv_to_lv_samples==2)[0].median()
+        i_myo_center = lv_myo_sample_points[myo_center_along_line]
+    i_myo_center_aug = torch.cat((i_myo_center, torch.zeros_like(i_myo_center[:1]), torch.ones_like(i_myo_center[:1])), -1)
+    w_myo_center_aug = (affines[lv_midventr_slice] @ i_myo_center_aug.T).T
+    w_myo_center = w_myo_center_aug[:-1]
 
     # First translate to put rotation center at origin
     translate = torch.eye(4, dtype=la_vector.dtype)
-    translate[:3, 3] = -w_hear_center
+    translate[:3, 3] = -w_myo_center
     # Then rotate (inverse rotation)
     rotation_inv = torch.eye(4, dtype=la_vector.dtype)
-    rotation_inv[:3, :3] = (rot_rv @ rot_la).T  # Transpose for inverse
-    # Then translate back
-    # post_translate = torch.eye(4, dtype=la_vector.dtype)
-    # post_translate[:3, 3] = w_lv_midway_center
-    # Combined transformation: post_translate @ rotation_inv @ pre_translate
+    rotation_inv[:3, :3] = rot_la.T  # Transpose for inverse
     normalization_aff = rotation_inv @ translate
     oriented_affines = [normalization_aff @ aff for aff in affines]
 
+    plane_equations = get_image_plane_from_array(torch.stack(oriented_affines))
+    lv_rv_vector_points = plane_intersection(plane_equations[2][None], plane_equations[lv_midventr_slice][None])[0].double()
+    lv_rv_vector = lv_rv_vector_points[1] - lv_rv_vector_points[0]
+    if use_sa_normal_as_la:
+        la_vector = plane_equations[lv_midventr_slice][:3]
+    else:
+        la_vector_points = plane_intersection(plane_equations[2][None], plane_equations[0][None])[0].double()
+        la_vector = la_vector_points[1] - la_vector_points[0]
+    # Calculate affine matrix that aligns LV-RV vector with y axis
+    y_vector = torch.tensor((0, 1, 0), dtype=lv_rv_vector.dtype)
+    rv_la_cross_vector = torch.cross(la_vector, lv_rv_vector)
+    rv_la_cross_vector = rv_la_cross_vector / rv_la_cross_vector.norm()
+    rv_to_y_angle = angle_between_vectors(rv_la_cross_vector, y_vector) # the angle to y axis
+    rot_rv = rotation_matrix(rv_to_y_angle, la_vector)
+    normalization_aff = torch.eye(4, dtype=la_vector.dtype)
+    # Rotate rv vector to y axis (inverse rotation)
+    normalization_aff[:3, :3] = rot_rv.T
+    final_affines = [normalization_aff @ aff for aff in oriented_affines]
+
+    final_affines = [a.float() for a in final_affines]
+
     if debug:
+        # Intermediate rotation
+        planes = get_image_plane_from_array(torch.stack(oriented_affines))
+        v = planes[lv_midventr_slice][:3]
+        ang_sacross_la_z_1 = torch.rad2deg(angle_between_vectors(v, torch.tensor([0, 0., 1.])))
+        ang_sacross_la_y_1 = torch.rad2deg(angle_between_vectors(v, torch.tensor([0., 1., 0.])))
+        ang_sacross_la_x_1 = torch.rad2deg(angle_between_vectors(v, torch.tensor([1., 0., 0.])))
+        v = plane_intersection(planes[0:1], planes[2:3])
+        ang_24ch_la_z_1 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0, 0., 1.])))
+        ang_24ch_la_y_1 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0., 1., 0.])))
+        ang_24ch_la_x_1 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([1., 0., 0.])))
+        w_lv_center_1 = plane_line_intersection(v[0, 1], v[0, 0],
+                                         planes[lv_midventr_slice])
+        w_lv_center_1_aug = torch.cat((w_lv_center_1, torch.ones_like(w_lv_center_1[:1])))
+        w_myo_center_1 = (oriented_affines[lv_midventr_slice] @ i_myo_center_aug.T).T
+
+        v = plane_intersection(planes[lv_midventr_slice][None], planes[2:3])
+        ang_lvrv_z_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0, 0., 1.]))).abs().item()
+        ang_lvrv_y_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0., 1., 0.]))).abs().item()
+        ang_lvrv_x_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([1., 0., 0.]))).abs().item()
+
+        # final normalization
+        planes = get_image_plane_from_array(torch.stack(final_affines))
+        v = planes[lv_midventr_slice][:3]
+        ang_sacross_la_z_2 = torch.rad2deg(angle_between_vectors(v, torch.tensor([0, 0., 1.]))).abs().item()
+        ang_sacross_la_z_2 = min(ang_sacross_la_z_2, abs(180-ang_sacross_la_z_2))
+        ang_sacross_la_y_2 = torch.rad2deg(angle_between_vectors(v, torch.tensor([0., 1., 0.]))).abs().item()
+        ang_sacross_la_x_2 = torch.rad2deg(angle_between_vectors(v, torch.tensor([1., 0., 0.]))).abs().item()
+        thresh = 1.0 if use_sa_normal_as_la else 10.
+        if ang_sacross_la_z_2 > thresh:
+            raise ValueError
+        if abs(ang_sacross_la_y_2 - 90) > thresh or abs(ang_sacross_la_x_2 - 90) > thresh:
+            raise ValueError
+        v = plane_intersection(planes[0:1], planes[2:3])
+        ang_24ch_la_z_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0, 0., 1.]))).abs().item()
+        ang_24ch_la_z_2 = min(ang_24ch_la_z_2, abs(180-ang_24ch_la_z_2))
+        ang_24ch_la_y_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0., 1., 0.]))).abs().item()
+        ang_24ch_la_x_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([1., 0., 0.]))).abs().item()
+        thresh = 10.0 if use_sa_normal_as_la else 1.
+        if ang_24ch_la_z_2 > thresh:
+            raise ValueError
+        if abs(ang_24ch_la_y_2 - 90) > thresh or abs(ang_24ch_la_x_2 - 90) > thresh:
+            raise ValueError
+        w_lv_center_2 = plane_line_intersection(v[0, 1], v[0, 0],
+                                            planes[lv_midventr_slice])
+        w_myo_center_2 = (oriented_affines[lv_midventr_slice] @ i_myo_center_aug.T).T
+        if  w_myo_center_2[:3].norm() > 1e-4:
+            raise ValueError
         # -------- Logging segmentations as niftis ----------------------------
         assert segs is not None
         la2ch_seg = segs[0]
@@ -286,17 +380,19 @@ def normalize_slice_orientation(affines: List[torch.Tensor], segs: Optional[List
                                                      frames=None,
                                                      oob_dist_thresh=10.)
         path = Path('debug_alignment')
-        path.mkdir(exist_ok=True)
+        fold = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}'
+        path = path / fold
+        path.mkdir(exist_ok=True, parents=True)
         array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], affines[0].numpy())
         array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], affines[1].numpy())
         array_to_nifti(str(path/f"pre_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], affines[2].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa3.nii.gz"), segs[5][:, :, None].numpy(), affines[5].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa4.nii.gz"), segs[6][:, :, None].numpy(), affines[6].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa5.nii.gz"), segs[7][:, :, None].numpy(), affines[7].numpy())
-        array_to_nifti(str(path/f"post_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], oriented_affines[0].numpy())
-        array_to_nifti(str(path/f"post_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], oriented_affines[1].numpy())
-        array_to_nifti(str(path/f"post_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], oriented_affines[2].numpy())
-        array_to_nifti(str(path/f"post_opt_sa3.nii.gz"), segs[5][:, :, None].numpy(), oriented_affines[5].numpy())
-        array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), segs[6][:, :, None].numpy(), oriented_affines[6].numpy())
-        array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), segs[7][:, :, None].numpy(), oriented_affines[7].numpy())
-    return oriented_affines
+        array_to_nifti(str(path/f"pre_opt_sa3.nii.gz"), segs[6][:, :, None].numpy(), affines[6].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa4.nii.gz"), segs[7][:, :, None].numpy(), affines[7].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa5.nii.gz"), segs[8][:, :, None].numpy(), affines[8].numpy())
+        array_to_nifti(str(path/f"post_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], final_affines[0].numpy())
+        array_to_nifti(str(path/f"post_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], final_affines[1].numpy())
+        array_to_nifti(str(path/f"post_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], final_affines[2].numpy())
+        array_to_nifti(str(path/f"post_opt_sa3.nii.gz"), segs[6][:, :, None].numpy(), final_affines[6].numpy())
+        array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), segs[7][:, :, None].numpy(), final_affines[7].numpy())
+        array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), segs[8][:, :, None].numpy(), final_affines[8].numpy())
+    return final_affines

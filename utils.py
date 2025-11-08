@@ -517,3 +517,79 @@ def data_frame_to_line_plot(df, x, metric_name, subj_idx, save_path):
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()  # Close the figure to free memory
+
+
+def draw_3d_vectors_on_image(
+        image,
+        vectors,
+        vector_downsample=20,
+        min_deform_thresh=2,
+        thickness=1):
+    """
+    Draw 3D vectors on an image using OpenCV, encoding out-of-plane direction with red-blue color.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The base image (H, W, 3), (H, W, 1) or (H, W) numpy array.
+    vectors : np.ndarray
+        Array of shape (H, W, 3) numpy array giving vector components (vx, vy, vz).
+    vector_downsample : int
+        Downsampling of vector array to have vectors be more spaced out.
+    thickness : int
+        Arrow thickness.
+
+    Returns
+    -------
+    overlay : np.ndarray
+        The image with arrows drawn (uint8 BGR) (3, H, W).
+    """
+
+    # Ensure 3-channel BGR
+    if image.ndim == 2:
+        overlay = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif image.shape[-1] == 1:
+        overlay = cv2.cvtColor(image[...,0], cv2.COLOR_GRAY2BGR)
+    else:
+        overlay = image.copy()
+    if overlay.dtype != np.uint8:
+        if overlay.dtype == np.float32 or overlay.dtype == float or overlay.dtype == np.float64:
+            if np.max(image) <= 1.0:
+                overlay *= 255
+            overlay = overlay.astype(np.uint8)
+        else:
+            overlay = overlay.astype(np.uint8)
+    points = np.stack(np.meshgrid(np.arange(image.shape[0]), np.arange(image.shape[1])), axis=-1)
+    points_ = points[::vector_downsample, ::vector_downsample].reshape(-1, 2)
+    vectors_ = vectors[::vector_downsample, ::vector_downsample].reshape(-1, 3)
+
+    # vectors_ *= -1  # Plotting is upside down I guess?
+    # Draw arrows
+    for (x, y), (vx, vy, vz) in zip(points_, vectors_):
+        # if abs(vx) < min_deform_thresh and abs(vy) < min_deform_thresh and abs(vz) < min_deform_thresh:
+        #     continue
+        # Compute endpoint
+        x2 = int(round(x + vx))
+        y2 = int(round(y + vy))
+        # Map z to color: blue (negative), red (positive)
+        vz = round(vz)*50
+        # Interpolate color: blue (-1) → green (0) → red (+1)
+        if vz >= 0:
+            # between green and red
+            r = int(vz)
+            g = int(255 - vz)
+            b = 0
+        else:
+            # between blue and green
+            vz_abs = abs(vz)
+            r = 0
+            g = int(255 - vz_abs)
+            b = int(vz_abs)
+
+        b, g, r = max(0, min(255, b)), max(0, min(255, g)), max(0, min(255, r))
+        color = (b, g, r)  # BGR for OpenCV
+        # r = int(min(255, max(0, vz)))
+        # b = int(min(255, max(0, -vz)))
+        # color = (b, 255, r)
+        cv2.arrowedLine(overlay, (int(x), int(y)), (x2, y2), color, thickness, tipLength=0.3)
+    return np.moveaxis(overlay, -1, 0)

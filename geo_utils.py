@@ -21,7 +21,7 @@ def get_image_plane_from_array(affines):
     points_voxel_space = torch.tensor([[0., 0., 0., 1.],
                                        [1., 0., 0., 1.],
                                        [0., 1., 0., 1.]
-                                       ], dtype=torch.float32, device=affines.device)
+                                       ], dtype=affines.dtype, device=affines.device)
     points_voxel_space = torch.tile(points_voxel_space, (affines.shape[0], 1))
     affines_ = torch.repeat_interleave(affines, 3, dim=0)
     points_scanner_space = torch.einsum("ijk,ik->ij", [affines_, points_voxel_space]).reshape(affines.shape[0], 3, -1)
@@ -111,4 +111,14 @@ def rotation_matrix(theta, axis):
     bc, ad, ac, ab, bd, cd = b * c, a * d, a * c, a * b, b * d, c * d
     return torch.tensor([[aa + bb - cc - dd, 2 * (bc + ad), 2 * (bd - ac)],
                          [2 * (bc - ad), aa + cc - bb - dd, 2 * (cd + ab)],
-                         [2 * (bd + ac), 2 * (cd - ab), aa + dd - bb - cc]], dtype=torch.float32)
+                         [2 * (bd + ac), 2 * (cd - ab), aa + dd - bb - cc]], dtype=theta.dtype)
+
+
+
+def angle_between_vectors(a, b, eps=1e-8):
+    a_norm = a / (torch.norm(a, dim=-1, keepdim=True) + eps)
+    b_norm = b / (torch.norm(b, dim=-1, keepdim=True) + eps)
+    cos_theta = torch.sum(a_norm * b_norm, dim=-1)
+    cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
+    angle = torch.acos(cos_theta)
+    return angle  # radians

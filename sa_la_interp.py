@@ -121,7 +121,12 @@ def interpolate_sa_seg_to_la(sa_seg_file: str, sa_img_file: str, la_file: str, f
     return interp_ims, interp_segs
 
 
-def interpolate_seg_to_other_view(seg, img, seg_aff, target_shape, target_aff, oob_dist_thresh=10.):
+def interpolate_seg_to_other_view(seg: np.ndarray,
+                                  img: np.ndarray,
+                                  seg_aff: np.ndarray,
+                                  target_shape: Optional[Tuple[int, int, int]],
+                                  target_aff: Optional[np.ndarray],
+                                  target_w_coords: Optional[np.ndarray], oob_dist_thresh=10.):
     assert len(seg.shape) == 3
     seg_coords = np.meshgrid(*[np.arange(i, dtype=float) for i in seg.shape], indexing="ij")
     seg_coords_ = np.stack(seg_coords, -1).reshape(-1, 3)
@@ -132,11 +137,14 @@ def interpolate_seg_to_other_view(seg, img, seg_aff, target_shape, target_aff, o
     img_ = img.reshape(-1, 1)
 
     assert len(target_shape) == 3
-    target_coords = np.meshgrid(*[np.arange(i, dtype=float) for i in target_shape], indexing="ij")
-    target_coords_ = np.stack(target_coords, -1).reshape(-1, 3)
-    target_coords_aug_ = np.concatenate((target_coords_, np.ones_like(target_coords_[..., :1])), axis=-1)
-    target_w_coords_aug_ = (target_aff @ target_coords_aug_.T).T
-    target_w_coords_ = target_w_coords_aug_[..., :3]
+    if target_w_coords is None:
+        target_coords = np.meshgrid(*[np.arange(i, dtype=float) for i in target_shape], indexing="ij")
+        target_coords_ = np.stack(target_coords, -1).reshape(-1, 3)
+        target_coords_aug_ = np.concatenate((target_coords_, np.ones_like(target_coords_[..., :1])), axis=-1)
+        target_w_coords_aug_ = (target_aff @ target_coords_aug_.T).T
+        target_w_coords_ = target_w_coords_aug_[..., :3]
+    else:
+        target_w_coords_ = target_w_coords.reshape(-1, 3)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     seg_w_coords_ = torch.tensor(seg_w_coords_, device=device)
@@ -202,15 +210,19 @@ def interpolate_sa_segs_to_la_from_nifti(sa_seg_dir: str, sa_img_dir: str, targe
 def interpolate_sa_segs_to_la(sa_seg_arrays: List[np.ndarray],
                               sa_img_arrays: List[np.ndarray],
                               sa_affs: List[np.ndarray],
-                              target_shape: Tuple[int, int, int],
-                              target_aff: np.ndarray,
+                              target_shape: Optional[Tuple[int, int, int]] = None,
+                              target_aff: Optional[np.ndarray] = None,
+                              target_w_coords: Optional[np.ndarray] = None,
                               frames: Optional[Tuple[int, ...]] = None,
                               oob_dist_thresh = 9999.):
-    sa_img_shapes = [i.squeeze().shape for i in sa_img_arrays]
+    sa_img_shapes = [(*i.shape[:2], i.shape[-1]) for i in sa_img_arrays]
+    H, W, T = sa_img_shapes[0]
+    if target_shape is None:
+        target_shape = target_w_coords.shape[:-1]
     assert all([len(i) == 3 for i in sa_img_shapes])
-    assert all([i[-1] == 50 for i in sa_img_shapes])
+    assert all([i[-1] == T for i in sa_img_shapes])
     assert len(target_shape) == 3
-    assert target_shape[-1] == 50
+    assert target_shape[-1] == T
 
     # Compute world coords of all SA slices
     sa_coords = [np.stack(np.meshgrid(np.arange(shape[0], dtype=float),
@@ -222,18 +234,21 @@ def interpolate_sa_segs_to_la(sa_seg_arrays: List[np.ndarray],
     sa_coords_aug_ = [i.reshape(-1, 4) for i in sa_coords_aug]
     sa_w_coords_aug_slices_ = [(aff @ c_.T).T for aff, c_ in zip(sa_affs, sa_coords_aug_)]
     sa_w_coords_slices_ = [i[...,:3] for i in sa_w_coords_aug_slices_]
-    sa_img_arrays_slices_ = [i.reshape(-1, 50) for i in sa_img_arrays]
-    sa_seg_arrays_slices_ = [i.reshape(-1, 50) for i in sa_seg_arrays]
+    sa_img_arrays_slices_ = [i.reshape(-1, T) for i in sa_img_arrays]
+    sa_seg_arrays_slices_ = [i.reshape(-1, T) for i in sa_seg_arrays]
 
-    # Compute world coords of target slice
-    target_coords = np.stack(np.meshgrid(np.arange(target_shape[0], dtype=float),
-                                     np.arange(target_shape[1], dtype=float),
-                                     [0], indexing="ij"), axis=-1)
-    target_coords = target_coords.squeeze(-2)
-    target_coords_aug = np.concatenate((target_coords, np.ones_like(target_coords[..., :1])), axis=-1)
-    target_coords_aug_ = target_coords_aug.reshape(-1, 4)
-    target_w_coords_aug_ = (target_aff @ target_coords_aug_.T).T
-    target_w_coords_ = target_w_coords_aug_[..., :-1]
+    if target_w_coords is None:
+        # Compute world coords of target slice
+        target_coords = np.stack(np.meshgrid(np.arange(target_shape[0], dtype=float),
+                                         np.arange(target_shape[1], dtype=float),
+                                         [0], indexing="ij"), axis=-1)
+        target_coords = target_coords.squeeze(-2)
+        target_coords_aug = np.concatenate((target_coords, np.ones_like(target_coords[..., :1])), axis=-1)
+        target_coords_aug_ = target_coords_aug.reshape(-1, 4)
+        target_w_coords_aug_ = (target_aff @ target_coords_aug_.T).T
+        target_w_coords_ = target_w_coords_aug_[..., :-1]
+    else:
+        target_w_coords_ = target_w_coords.reshape(-1, 3)
 
     # Bring world coords into GPU and flatten SA coords
     device = "cuda" if torch.cuda.is_available() else "cpu"
