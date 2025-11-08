@@ -833,13 +833,13 @@ class INR_AutoReg(pl.LightningModule):
             aff = aff[0].cpu().numpy()
             v = v.astype(np.uint8)
             v = np.moveaxis(v[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v, aff)
             s = s.astype(np.uint8)
             s = np.moveaxis(s[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s, aff)
             gt = gt.astype(np.uint8)
             gt = np.moveaxis(gt[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt[:,:,None], aff)
+            array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt, aff)
 
     @torch.no_grad()
     def log_volume(self,
