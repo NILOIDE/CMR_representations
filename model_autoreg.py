@@ -794,7 +794,12 @@ class INR_AutoReg(pl.LightningModule):
         psnrs = [np.mean(i) for i in psnrs if i]
         ssims = [np.mean(i) for i in ssims if i]
         dices = [torch.stack(d, 0).mean(0) for i, d in enumerate(dices) if d]
-        metrics = {"Dice": dices, "PSNR": psnrs, "SSIM": ssims}
+        metrics = {"PSNR": psnrs, "SSIM": ssims,
+                   "Dice_BG": [i[0].item() for i in dices],
+                   "Dice_LV": [i[1].item() for i in dices],
+                   "Dice_MYO": [i[2].item() for i in dices],
+                   "Dice_RV": [i[3].item() for i in dices],
+                   }
         pd.DataFrame(metrics).to_csv(str(self.log_path / f"epoch_{self.current_epoch:06d}_subj_{subj_idx}.csv"), index=False)
         # Save to WANDB
         if not self.logging_wandb_disabled:

@@ -31,7 +31,7 @@ class CMRDataModule(pl.LightningDataModule):
                  num_val: int = 8,
                  num_test: int = 1,
                  full_seq_dataset: bool = False,
-                 replace_existing_preprocessed=True,
+                 replace_existing_preprocessed=False,
                  crop_around_heart=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,

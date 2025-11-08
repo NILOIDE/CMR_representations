@@ -109,7 +109,6 @@ def main():
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
-    quit()
     os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
