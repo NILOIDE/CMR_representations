@@ -392,7 +392,7 @@ class INR_AutoReg(pl.LightningModule):
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
             loss_regist_recon, loss_regist_seg, loss_regist_reg = self.compute_registration_losses(
                 latent_params, values_pred, seg_pred, deform_pred, world_coords)
-            loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_regRegistration
+            loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_reg
         # Recon derivative loss (if user decided to supervise it)
         loss_dt = 0.0
         if self.supervise_deriv:
