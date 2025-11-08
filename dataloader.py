@@ -31,7 +31,7 @@ class CMRDataModule(pl.LightningDataModule):
                  num_val: int = 8,
                  num_test: int = 1,
                  full_seq_dataset: bool = False,
-                 replace_existing_processed=False,
+                 replace_existing_preprocessed=True,
                  crop_around_heart=True,
                  batch_size: int = 32,
                  num_coords: int = 4000,
@@ -44,7 +44,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.train_dset_class = CardiacUKBBFullImage if full_seq_dataset else CardiacUKBB
         self.test_dset_class = CardiacUKBBValidationFullImage if full_seq_dataset else CardiacUKBBValidation
         self.crop_around_heart = crop_around_heart
-        self.replace_existing_processed = replace_existing_processed
+        self.replace_existing_processed = replace_existing_preprocessed
         self.batch_size = batch_size
         self.num_coords = num_coords
         self.inf_num_coords = inf_num_coords

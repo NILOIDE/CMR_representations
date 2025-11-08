@@ -438,7 +438,7 @@ class INR_AutoReg(pl.LightningModule):
             dset_str = 'train'
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
             # for i in range(0, min(len(dset), 8)):
-            for i in range(1, 8):
+            for i in range(0, 8):
                 batch = tuple(b[None].cuda() for b in dset[i])
                 latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
                 self.log_images(i, dset, mode=dset_str,
@@ -448,26 +448,26 @@ class INR_AutoReg(pl.LightningModule):
                 self.log_volume(i, dset, mode=dset_str,
                                 latent_params=latent_params,
                                 aff_def_params=aff_def_params)
-        # if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
-        #     dset_str = 'val'
-        #     dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        #     for i in range(0, len(dset)):
-        #         latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-        #         optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
-        #             = self.inference(i, dset,
-        #                              latent_params=latent_params,
-        #                              aff_def_params=aff_def_params,
-        #                              intens_scale_params=intens_scale_params)
-        #         if not self.logging_wandb_disabled:
-        #             wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-        #             wandb.log({f'{dset_str}/inf_best_score': best_score})
-        #         self.log_images(i, dset, mode=dset_str,
-        #                         latent_params=optimized_latent,
-        #                         aff_def_params=optimized_affine_def,
-        #                         intens_scale_params=optimized_intensity_def)
-        #         # self.log_volume(i, dset, mode=dset_str,
-        #         #                 latent_params=optimized_latent,
-        #         #                 aff_def_params=optimized_affine_def)
+        if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
+            dset_str = 'val'
+            dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+            for i in range(0, len(dset)):
+                latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+                optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+                    = self.inference(i, dset,
+                                     latent_params=latent_params,
+                                     aff_def_params=aff_def_params,
+                                     intens_scale_params=intens_scale_params)
+                if not self.logging_wandb_disabled:
+                    wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+                    wandb.log({f'{dset_str}/inf_best_score': best_score})
+                self.log_images(i, dset, mode=dset_str,
+                                latent_params=optimized_latent,
+                                aff_def_params=optimized_affine_def,
+                                intens_scale_params=optimized_intensity_def)
+                self.log_volume(i, dset, mode=dset_str,
+                                latent_params=optimized_latent,
+                                aff_def_params=optimized_affine_def)
 
     def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
         return CardiacUKBBValidation([dset.data_paths[subj_idx]],
