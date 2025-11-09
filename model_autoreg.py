@@ -77,6 +77,7 @@ class INR_AutoReg(pl.LightningModule):
         self.weight_loss_deriv = kwargs["weight_loss_deriv"]
         self.supervise_deriv = self.weight_loss_deriv != 0
         self.weight_loss_seg = kwargs["weight_loss_seg"]
+        self.supervise_seg = self.weight_loss_seg != 0
         self.weight_loss_regist_recon = kwargs['weight_loss_regist_recon']
         self.weight_loss_regist_seg = kwargs['weight_loss_regist_seg']
         self.weight_loss_regist_reg = kwargs['weight_loss_regist_reg']
@@ -383,10 +384,12 @@ class INR_AutoReg(pl.LightningModule):
         # Recon loss
         loss_recon = self.psnr_loss(values_pred, values_deform)
         # Seg metrics and loss
-        seg_pred, segs = torch.softmax(seg_pred, -1)*gt_avail[...,None], segs*gt_avail[...,None]
-        loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
-        dice_per_class = 1 - loss_seg_per_class
-        loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
+        loss_seg, dice_per_class = 0.0, torch.tensor((0.,0.,0.,0.))
+        if self.supervise_seg:
+            seg_pred, segs = torch.softmax(seg_pred, -1)*gt_avail[...,None], segs*gt_avail[...,None]
+            loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
+            dice_per_class = 1 - loss_seg_per_class
+            loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
         # Registration metrics_and loss
         loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_reg = 0.0, 0.0, 0.0, 0.0
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:

@@ -24,7 +24,7 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (0, 10, 100, 500, 1000, 5000,)
+    addit_log_epochs: Tuple[int, ...] = (10, 100, 1000,)
     num_train: int = 100
     num_val: int = 10
     num_test: int = 1
@@ -50,12 +50,12 @@ class Params:
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 1e0
+    weight_loss_seg: float = 0e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
     regist_task_start_epoch: int = 0
-    weight_loss_regist_recon: float = 1e0
-    weight_loss_regist_seg: float = 1e0
+    weight_loss_regist_recon: float = 0e0
+    weight_loss_regist_seg: float = 0e0
     weight_loss_regist_reg: float = 0e-4
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
