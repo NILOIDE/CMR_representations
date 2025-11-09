@@ -532,7 +532,7 @@ class INR_AutoReg(pl.LightningModule):
             if optimize_aff_def_params: opt_affine_def.zero_grad()
             if optimize_intens_scale_params: opt_intensity_def.zero_grad()
             # Make predictions for this batch
-            values_pred, seg_pred, _, values_pred_d = self.forward_with_point_spread(
+            values_pred, seg_pred, _, values_pred_d, _ = self.forward_with_point_spread(
                                                                    coords_voxel, aff_params_padded,
                                                                    spacings_padded, needs_flip_padded,
                                                                    slice_idx,
