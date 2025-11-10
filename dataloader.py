@@ -141,7 +141,7 @@ class CMRDataModule(pl.LightningDataModule):
         la_interp_segs = []
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
         for i, parent in enumerate(subjects):
-            if parent == "1013493":
+            if parent in {"1013493", "1439318"}:
                 continue
             if count == max_num:
                 break

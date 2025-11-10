@@ -50,13 +50,13 @@ class Params:
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 0e0
+    weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 0
-    weight_loss_regist_recon: float = 0e0
-    weight_loss_regist_seg: float = 0e0
-    weight_loss_regist_reg: float = 0e-4
+    regist_task_start_epoch: int = 5000
+    weight_loss_regist_recon: float = 1e0
+    weight_loss_regist_seg: float = 1e0
+    weight_loss_regist_reg: float = 1e-4
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4

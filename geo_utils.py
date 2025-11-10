@@ -53,7 +53,7 @@ def plane_intersection(a: torch.Tensor, b: torch.Tensor):
     A = torch.stack([a_normal, b_normal, dir_inter], dim=1)
     solution = torch.zeros((a.shape[0],), dtype=a.dtype, device=a.device)
     d = torch.stack([a[:, 3], b[:, 3], solution], dim=1)
-    p_inter = torch.linalg.solve(A, d)  # TODO
+    p_inter = torch.linalg.solve(A, d)
     line = torch.stack((p_inter, p_inter + dir_inter), dim=1)
     return line
 

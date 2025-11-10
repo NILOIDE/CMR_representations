@@ -164,8 +164,6 @@ class INR_AutoReg(pl.LightningModule):
         source_seg_pred = source_seg_pred.detach()
         target_inten_pred, target_seg_pred, target_coords \
              = self.forward_registration(latent_params, source_deform_pred, source_world_coords, target_t)
-        target_inten_pred = target_inten_pred.detach()
-        target_seg_pred = target_seg_pred.detach()
         loss_recon = self.psnr_loss(target_inten_pred, source_inten_pred) * self.weight_loss_regist_recon
         target_seg_pred, source_seg_pred = torch.softmax(target_seg_pred, -1), torch.softmax(source_seg_pred, -1)
         loss_seg = self.seg_loss(target_seg_pred.moveaxis(-1,1), source_seg_pred.moveaxis(-1,1)).mean() * self.weight_loss_regist_seg
@@ -644,6 +642,7 @@ class INR_AutoReg(pl.LightningModule):
         videos = [[] for _ in range(20)]
         preds = [[] for _ in range(20)]
         segs = [[] for _ in range(20)]
+        defs = [[] for _ in range(20)]
         psnrs = [[] for _ in range(20)]
         ssims = [[] for _ in range(20)]
         dices = [[] for _ in range(20)]
@@ -673,9 +672,10 @@ class INR_AutoReg(pl.LightningModule):
                         latent_params=latent_params,
                         aff_def_params=aff_def_params,
                         return_deriv=True)
-                pred_seg_, pred_vals_, pred_vals_d_ = pred_seg_.detach(), pred_vals_.detach(), pred_vals_d_.detach()
-                pred_img = pred_vals_.reshape(H, W)
+                pred_seg_, pred_vals_, pred_deform_, pred_vals_d_ \
+                    = pred_seg_.detach(), pred_vals_.detach(), pred_deform_.detach(), pred_vals_d_.detach()
 
+                pred_img = pred_vals_.reshape(H, W)
                 psnr_metric = kornia.metrics.psnr(pred_img, images[0,s,...], max_val=1.0)
                 psnrs[s].append(psnr_metric.mean().detach().cpu().item())
                 ssim_metric = kornia.metrics.ssim(pred_img[None, None], images[:,s,None,...], window_size=11, max_val=1.0)
@@ -690,6 +690,8 @@ class INR_AutoReg(pl.LightningModule):
                 pred_seg_1hot = to_1hot(pred_seg_argmax.reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 dice = 1 - self.seg_loss(pred_seg_1hot[None].moveaxis(-1,1), seg_gt[None].moveaxis(-1,1)).mean(0).squeeze()
                 dices[s].append(dice.detach().cpu())
+                pred_def = pred_deform_.reshape(H, W, 3)
+                defs[s].append(pred_def.cpu().numpy().astype(float))
 
                 # Image
                 img = torch.stack([torch.cat([images[0,s,...], pred_img], 0)]*3, 0)
@@ -829,18 +831,21 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_nif_og.mkdir(exist_ok=True)
         preds = [np.stack(v, 0) for v in preds if v]
         segs = [np.stack(v, 0) for v in segs if v]
+        defs = [np.stack(v, 0) for v in defs if v]
         gt_ims = [np.stack(v, 0) for v in gt_ims if v]
-        for i, (gt, v, s) in enumerate(zip(gt_ims, preds, segs)):
+        for i, (gt, v, s, d) in enumerate(zip(gt_ims, preds, segs, defs)):
             aff_params = aff_params_padded[i][None] + aff_def_params[0, i].cpu()
             aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
             aff = aff[0].cpu().numpy()
-            v = v.astype(np.uint8)
+            v = v.astype(np.int32)
             v = np.moveaxis(v[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v, aff)
-            s = s.astype(np.uint8)
+            s = s.astype(np.int32)
             s = np.moveaxis(s[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s, aff)
-            gt = gt.astype(np.uint8)
+            d = np.moveaxis(d[..., None], 0, -1)
+            array_to_nifti(str(save_dir_nif / f"def_slice_{i:02d}.nii.gz"), d, aff)
+            gt = gt.astype(np.int32)
             gt = np.moveaxis(gt[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt, aff)
 
@@ -853,18 +858,21 @@ class INR_AutoReg(pl.LightningModule):
                    video_duration: float = 4,
                    mode="train",
                    res=(200, 200, 200)):
+        res_tensor = torch.tensor(res, dtype=torch.float32)
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
         coords = torch.stack(torch.meshgrid(*[torch.linspace(self.norm_min, self.norm_max, i) for i in res]), dim=-1)
         ims = []
         segs = []
         defs = []
+        def_quivers = []
         for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging {mode} volume for subject {subj_idx} (UKBB id: {subj_id})"):
             t_norm = t / 50
             c = torch.concatenate((coords, torch.full((*res, 1), t_norm)), dim=-1).cuda()
             z_im_slices = []
             z_seg_slices = []
             z_def_slices = []
+            z_def_quiver_slices = []
             for z in range(res[-1]):
                 c_z = c[:,:,z:z+1]
                 pred_vals_, pred_seg_, pred_def_ = self.forward_inr(c_z.reshape(1, -1, 4), latent_params)
@@ -872,26 +880,32 @@ class INR_AutoReg(pl.LightningModule):
                 pred_vals_ = pred_vals_.clip(0.0, 1.0)
                 pred_val = pred_vals_.reshape(c_z.shape[:-1])
                 pred_def = pred_def_.reshape(*c_z.shape[:-1], 3)
-                pred_def = pred_def * torch.tensor(res, device=pred_def.device)
+                pred_def_scale = pred_def * res_tensor.to(pred_def.device)
                 quiver_image = draw_3d_vectors_on_image(pred_val.cpu().numpy(),
-                                                        pred_def[...,0, :3].cpu().numpy())
+                                                        pred_def_scale[...,0, :].cpu().numpy())
                 quiver_image = quiver_image[...,None]
                 pred_seg = pred_seg.cpu().numpy()
                 pred_seg = pred_seg.astype(np.uint8)
                 pred_val = pred_val.cpu().numpy()
                 pred_val = (pred_val*255).astype(np.uint8)
+                pred_def = pred_def.cpu().numpy()
+                pred_def = pred_def.astype(float)
                 z_im_slices.append(pred_val)
                 z_seg_slices.append(pred_seg)
-                z_def_slices.append(quiver_image)
+                z_def_slices.append(pred_def)
+                z_def_quiver_slices.append(quiver_image)
             pred_im_t = np.concatenate(z_im_slices, 2)
             pred_seg_t = np.concatenate(z_seg_slices, 2)
             pred_def_t = np.concatenate(z_def_slices, 3)
+            pred_def_quiver_t = np.concatenate(z_def_quiver_slices, 3)
             ims.append(pred_im_t)
             segs.append(pred_seg_t)
             defs.append(pred_def_t)
+            def_quivers.append(pred_def_quiver_t)
         ims = np.stack(ims, -1)
         segs = np.stack(segs, -1)
         defs = np.stack(defs, -1)
+        def_quivers = np.stack(def_quivers, -1)
 
         if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
             return
@@ -903,21 +917,27 @@ class INR_AutoReg(pl.LightningModule):
         save_dir.parent.mkdir(exist_ok=True)
         save_dir.mkdir(exist_ok=True)
         # Save volumes to disk as nifti
-        # Use the coordinate system of the top-most SA slice (ie. 3)
-        aff_params = aff_params_padded[3][None] + aff_def_params[0, 3].cpu()
-        aff = params_to_mat(aff_params, torch.ones_like(spacings_padded[3][None]), flippings_padded[3][None])
-        aff = aff[0].cpu().numpy()
+        # Voxel (0,0,0) -> (domain_min, domain_min, domain_min)
+        spacing = (self.norm_max - self.norm_min) / (res_tensor - 1)  # voxel spacing along each axis
+        aff = np.array([
+            [spacing, 0, 0, self.norm_min],
+            [0, spacing, 0, self.norm_min],
+            [0, 0, spacing, self.norm_min],
+            [0, 0, 0, 1]
+        ], dtype=np.float32)
         save_dir_pred = save_dir / 'pred'
         save_dir_pred.mkdir(exist_ok=True)
-        array_to_nifti(str(save_dir_pred / f"full.nii.gz"), ims, aff)
-        array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), segs, aff)
+        array_to_nifti(str(save_dir_pred / f"full.nii.gz"), ims.astype(np.int32), aff)
+        array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), segs.astype(np.int32), aff)
+        array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), defs.astype(float), aff)
         save_dir_gt = save_dir.parent / "gt"
         save_dir_gt.mkdir(exist_ok=True)
+
         for i in range(gt_images.shape[0]):
-            aff = params_to_mat(aff_params, torch.ones_like(spacings_padded[i][None]), flippings_padded[i][None])
+            aff = params_to_mat(aff_params_padded[i] + aff_def_params[0, i], torch.ones_like(spacings_padded[i][None]), flippings_padded[i][None])
             aff = aff[0].cpu().numpy()
-            array_to_nifti(str(save_dir_gt / f"slice{i}.nii.gz"), gt_images[i, ..., None, None].numpy(), aff)
-            array_to_nifti(str(save_dir_gt / f"slice{i}_seg.nii.gz"), gt_segs[i, ..., None, None].numpy(), aff)
+            array_to_nifti(str(save_dir_gt / f"slice{i}.nii.gz"), gt_images[i, ..., None, None].numpy().astype(np.int32), aff)
+            array_to_nifti(str(save_dir_gt / f"slice{i}_seg.nii.gz"), gt_segs[i, ..., None, None].numpy().astype(np.int32), aff)
 
         slice_indices = range(20, res[2] - 20, res[2] // 10)
         ims_rgb = np.stack([ims]*3, axis=0)
