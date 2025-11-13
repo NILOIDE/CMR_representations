@@ -522,9 +522,10 @@ def data_frame_to_line_plot(df, x, metric_name, subj_idx, save_path):
 def draw_3d_vectors_on_image(
         image,
         vectors,
-        vector_downsample=20,
-        min_deform_thresh=2,
-        thickness=1):
+        vector_downsample=9,
+        upscale_factor=10,
+        arrow_thickness=0.5,
+        arrow_head_length=0.1):
     """
     Draw 3D vectors on an image using OpenCV, encoding out-of-plane direction with red-blue color.
 
@@ -536,13 +537,10 @@ def draw_3d_vectors_on_image(
         Array of shape (H, W, 3) numpy array giving vector components (vx, vy, vz).
     vector_downsample : int
         Downsampling of vector array to have vectors be more spaced out.
-    thickness : int
-        Arrow thickness.
-
     Returns
     -------
     overlay : np.ndarray
-        The image with arrows drawn (uint8 BGR) (3, H, W).
+        The image with arrows drawn (uint8 BGR) (H, W, 3).
     """
 
     # Ensure 3-channel BGR
@@ -552,6 +550,7 @@ def draw_3d_vectors_on_image(
         overlay = cv2.cvtColor(image[...,0], cv2.COLOR_GRAY2BGR)
     else:
         overlay = image.copy()
+    H, W, C = overlay.shape
     if overlay.dtype != np.uint8:
         if overlay.dtype == np.float32 or overlay.dtype == float or overlay.dtype == np.float64:
             if np.max(image) <= 1.0:
@@ -562,7 +561,10 @@ def draw_3d_vectors_on_image(
     points = np.stack(np.meshgrid(np.arange(image.shape[0]), np.arange(image.shape[1])), axis=-1)
     points_ = points[::vector_downsample, ::vector_downsample].reshape(-1, 2)
     vectors_ = vectors[::vector_downsample, ::vector_downsample].reshape(-1, 3)
+    points_ *= upscale_factor
+    vectors_ *= upscale_factor
 
+    overlay = cv2.resize(overlay, (H*upscale_factor, W*upscale_factor), interpolation=cv2.INTER_LINEAR)
     # vectors_ *= -1  # Plotting is upside down I guess?
     # Draw arrows
     for (x, y), (vx, vy, vz) in zip(points_, vectors_):
@@ -572,7 +574,7 @@ def draw_3d_vectors_on_image(
         x2 = int(round(x + vx))
         y2 = int(round(y + vy))
         # Map z to color: blue (negative), red (positive)
-        vz = round(vz)*50
+        vz = round(vz)*20
         # Interpolate color: blue (-1) → green (0) → red (+1)
         if vz >= 0:
             # between green and red
@@ -591,5 +593,7 @@ def draw_3d_vectors_on_image(
         # r = int(min(255, max(0, vz)))
         # b = int(min(255, max(0, -vz)))
         # color = (b, 255, r)
-        cv2.arrowedLine(overlay, (int(x), int(y)), (x2, y2), color, thickness, tipLength=0.3)
-    return np.moveaxis(overlay, -1, 0)
+        cv2.arrowedLine(overlay, (int(x), int(y)), (x2, y2), color,
+                        thickness=int(round(arrow_thickness*upscale_factor)), tipLength=arrow_head_length*upscale_factor)
+    overlay = cv2.resize(overlay, (overlay.shape[0]//upscale_factor, overlay.shape[1]//upscale_factor), interpolation=cv2.INTER_LINEAR)
+    return overlay

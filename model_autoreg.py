@@ -15,6 +15,7 @@ import pandas as pd
 from torch import nn
 from torchvision.utils import save_image
 import torch.nn.functional as F
+import torch.nn.init as init
 import lightning.pytorch as pl
 import wandb
 from monai.losses import DiceLoss
@@ -41,12 +42,13 @@ class INR_AutoReg(pl.LightningModule):
 
         self.coord_size = coord_size
         self.intensity_size = 1
+        self.num_classes = 4
         self.num_subjects = num_subjects
         self.max_slices = max_slices
         self.norm_min, self.norm_max = 0.0, 1.0
         self.point_spread_size = kwargs['point_spread_size']
-        self.point_spread_std = torch.tensor(kwargs['point_spread_std'], dtype=torch.float32).reshape(1, 1, 1, -1)
-
+        self.point_spread_std = torch.tensor(kwargs['point_spread_std'], dtype=torch.float32, device="cuda"
+                                             ).reshape(1, 1, 1, self.coord_size)
         self.latent_size = kwargs["latent_size"]
         self.subj_latents = nn.Parameter(torch.randn((self.num_subjects, self.latent_size),
                                                      dtype=torch.float32, device="cuda") * 1e-2, requires_grad=True)
@@ -56,14 +58,14 @@ class INR_AutoReg(pl.LightningModule):
         self.int_scale_range = kwargs["int_scale_range"]
         self.intensity_scale_params = nn.Parameter(torch.randn((self.num_subjects, self.max_slices, 1),
                                                                dtype=torch.float32, device="cuda") * 1e-3, requires_grad=True)
-        self.pos_enc = PosEncodingNeRFAnnealed(in_dim=5, # 3D + Cyclical time
+        self.pos_enc = PosEncodingNeRFAnnealed(in_dim=self.coord_size+1, # 3D + Cyclical time
                                                num_frequencies=kwargs['pe_num_frequencies'],
                                                anneal_max_iter=kwargs['pe_anneal_max_iter'],
                                                anneal_start_prop=kwargs['pe_anneal_start_prop'])
         self.canonical_inr = MLP(self.pos_enc.out_dim + self.latent_size,
                                  num_hidden_layers=kwargs['num_hidden_layers'],
                                  hidden_size=kwargs['hidden_size'],
-                                 out_size=1+4+3)
+                                 out_size=self.intensity_size + self.num_classes + (self.coord_size - 1))
         self.target_network = copy.deepcopy(self.canonical_inr)
 
         self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
@@ -80,9 +82,16 @@ class INR_AutoReg(pl.LightningModule):
         self.supervise_seg = self.weight_loss_seg != 0
         self.weight_loss_regist_recon = kwargs['weight_loss_regist_recon']
         self.weight_loss_regist_seg = kwargs['weight_loss_regist_seg']
-        self.weight_loss_regist_reg = kwargs['weight_loss_regist_reg']
+        self.weight_loss_regist_jac_reg = kwargs['weight_loss_regist_jac_reg']
+        self.weight_loss_regist_mag_reg = kwargs['weight_loss_regist_mag_reg']
         self.regist_task_start_epoch = kwargs['regist_task_start_epoch']
+        self.regist_weights_std = kwargs['regist_weights_std']
+        self.regist_target_update_rate = kwargs['regist_target_update_rate']
         self.supervise_regist = self.weight_loss_regist_seg != 0 or self.weight_loss_regist_recon != 0
+        # Target network prediction caches for ~10% speedup
+        self.regist_cache_dims = kwargs['regist_cache_dims']
+        self.regist_val_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
+        self.regist_seg_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
         self.lr = kwargs["learning_rate"]
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
@@ -144,31 +153,45 @@ class INR_AutoReg(pl.LightningModule):
                              latent_params: torch.Tensor,
                              deform_pred: torch.Tensor,
                              world_coords: torch.Tensor,
-                             target_t: float = 0.0
-                             ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                             subj_idx: Optional[torch.Tensor] = None,
+                             voxel_indices: Optional[torch.Tensor] = None,
+                             slice_indices: Optional[torch.Tensor] = None,
+                             source_t: float = 0.0
+                             ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if subj_idx is None:
+            source_coords = world_coords.clone()
+            source_coords[..., -1] = source_t
+            with torch.no_grad():
+                source_values_pred, source_seg_pred, _ = self.forward_inr(source_coords, latent_params, use_target_net=True)
+        else:
+            B, N = slice_indices.shape[:2]
+            b_idx_tile = torch.arange(B, dtype=torch.long, device=slice_indices.device)[:,None].tile(1, N)
+            xs, ys = voxel_indices[...,0], voxel_indices[...,1]
+            source_values_pred = self.regist_val_cache[b_idx_tile.flatten(), slice_indices.flatten(), xs.flatten(), ys.flatten()]
+            source_values_pred = source_values_pred.reshape(B, N).float() / 255
+            source_seg_pred = self.regist_seg_cache[b_idx_tile.flatten(), slice_indices.flatten(), xs.flatten(), ys.flatten()]
+            source_seg_pred = to_1hot(source_seg_pred, self.num_classes).reshape(B, N, -1)
         target_coords = world_coords.clone()
-        target_coords[..., -1] = target_t
         target_coords[..., :3] += deform_pred
         target_values_pred, target_seg_pred, _ = self.forward_inr(target_coords, latent_params, use_target_net=True)
-        return target_values_pred, target_seg_pred, target_coords
+        return source_values_pred, source_seg_pred, target_values_pred, target_seg_pred, target_coords
 
     def compute_registration_losses(self,
                                     latent_params: torch.Tensor,
-                                    source_inten_pred: torch.Tensor,
-                                    source_seg_pred: torch.Tensor,
                                     source_deform_pred: torch.Tensor,
                                     source_world_coords: torch.Tensor,
-                                    target_t: float = 0.0):
-        # source_world_coords = source_world_coords.detach()
-        source_inten_pred = source_inten_pred.detach()
-        source_seg_pred = source_seg_pred.detach()
-        target_inten_pred, target_seg_pred, target_coords \
-             = self.forward_registration(latent_params, source_deform_pred, source_world_coords, target_t)
+                                    subj_idx: Optional[torch.Tensor] = None,
+                                    voxel_indices: Optional[torch.Tensor] = None,
+                                    slice_indices: Optional[torch.Tensor] = None,
+                                    source_t: float = 0.0):
+        source_inten_pred, source_seg_pred, target_inten_pred, target_seg_pred, target_coords \
+             = self.forward_registration(latent_params, source_deform_pred, source_world_coords, subj_idx, voxel_indices,
+                                         slice_indices, source_t)
         loss_recon = self.psnr_loss(target_inten_pred, source_inten_pred) * self.weight_loss_regist_recon
-        target_seg_pred, source_seg_pred = torch.softmax(target_seg_pred, -1), torch.softmax(source_seg_pred, -1)
         loss_seg = self.seg_loss(target_seg_pred.moveaxis(-1,1), source_seg_pred.moveaxis(-1,1)).mean() * self.weight_loss_regist_seg
-        jac_det_loss = self.compute_jacobian_determinant_loss(source_world_coords, source_deform_pred) * self.weight_loss_regist_reg
-        return loss_recon, loss_seg, jac_det_loss
+        jac_det_loss = self.compute_jacobian_determinant_loss(source_world_coords, source_deform_pred) * self.weight_loss_regist_jac_reg
+        jac_mag_loss = (source_deform_pred*source_deform_pred).sum(-1).mean() * self.weight_loss_regist_mag_reg
+        return loss_recon, loss_seg, jac_det_loss, jac_mag_loss
 
     def compute_jacobian_determinant_loss(self, coords, deforms, add_identity=True):
         # Compute determinants and take norm
@@ -201,14 +224,14 @@ class INR_AutoReg(pl.LightningModule):
                 latent_params: torch.Tensor,
                 aff_def_params: Optional[torch.Tensor] = None,
                 return_deriv: bool = False,
-                return_jac_det: bool = True,
+                use_target_net: bool = False,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         # if return_deriv:
         #     latent_params.requires_grad = True
         #     aff_def_params.requires_grad = True
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 slice_idx, min_coords, max_coords, aff_def_params)
-        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params)
+        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params, use_target_net=use_target_net)
         values_pred_d = None
         if return_deriv:
             values_pred_d = torch.autograd.grad(values_pred, world_coords, grad_outputs=torch.ones_like(values_pred),
@@ -285,7 +308,9 @@ class INR_AutoReg(pl.LightningModule):
         values_pred = values_pred_[:, 0].reshape((coords.shape[0], coords.shape[1]))
         values_pred = torch.sigmoid(values_pred)
         seg_pred = values_pred_[:, 1:5].reshape((coords.shape[0], coords.shape[1], 4))
+        seg_pred = torch.softmax(seg_pred, -1)
         regist_pred = values_pred_[:, 5:].reshape((coords.shape[0], coords.shape[1], 3))
+        # regist_pred = self.regist_network(x_).reshape((coords.shape[0], coords.shape[1], 3))
         return values_pred, seg_pred, regist_pred
 
     def forward_intensity_params(self,
@@ -384,16 +409,16 @@ class INR_AutoReg(pl.LightningModule):
         # Seg metrics and loss
         loss_seg, dice_per_class = 0.0, torch.tensor((0.,0.,0.,0.))
         if self.supervise_seg:
-            seg_pred, segs = torch.softmax(seg_pred, -1)*gt_avail[...,None], segs*gt_avail[...,None]
+            seg_pred, segs = seg_pred*gt_avail[...,None], segs*gt_avail[...,None]
             loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
             dice_per_class = 1 - loss_seg_per_class
             loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
         # Registration metrics_and loss
-        loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_reg = 0.0, 0.0, 0.0, 0.0
+        loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg = 0.0, 0.0, 0.0, 0.0, 0.0
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
-            loss_regist_recon, loss_regist_seg, loss_regist_reg = self.compute_registration_losses(
-                latent_params, values_pred, seg_pred, deform_pred, world_coords)
-            loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_reg
+            loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg = self.compute_registration_losses(
+                latent_params, deform_pred, world_coords, subject_idx, coords_voxel, slice_idx)
+            loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_jac_reg + loss_regist_mag_reg
         # Recon derivative loss (if user decided to supervise it)
         loss_dt = 0.0
         if self.supervise_deriv:
@@ -409,8 +434,6 @@ class INR_AutoReg(pl.LightningModule):
         opt_inr.step()
         opt_deform.step()
         opt_inten.step()
-        # Copy weights to target net
-        self.target_network.load_state_dict(self.canonical_inr.state_dict())
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
@@ -423,7 +446,8 @@ class INR_AutoReg(pl.LightningModule):
                         "dice_RV": dice_per_class[3],
                         "registration_recon": loss_regist_recon,
                         "registration_seg": loss_regist_seg,
-                        "registration_reg": loss_regist_reg,
+                        "registration_jac_reg": loss_regist_jac_reg,
+                        "registration_mag_reg": loss_regist_mag_reg,
                         **loss_reg_dict}.items()}, prog_bar=False)
 
     @staticmethod
@@ -434,41 +458,89 @@ class INR_AutoReg(pl.LightningModule):
     def min_max_unnormalize(X, x_min, x_max, s_min=0., s_max=1.):
         return (X - s_min) / (s_max - s_min) * (x_max - x_min) + x_min
 
+    def cache_ED_predictions(self):
+        self.regist_val_cache = torch.zeros_like(self.regist_val_cache)
+        self.regist_seg_cache = torch.zeros_like(self.regist_seg_cache)
+        dset_str = 'train'
+        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        dset = CardiacUKBBValidation(dset.data_paths, dset.max_slices, dset.max_slice_shape,
+                                              dset.num_coords, to_gpu=True)
+        source_t = 0
+        for i in tqdm.tqdm(list(range(0, len(dset))), desc="Caching target net preds"):
+            batch = tuple(b[None].cuda() for b in dset[i])
+            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
+            images, images_dt, seg_argmax, _, full_indices, coord_min, coord_max, \
+                aff_params_padded, spacings_padded, flippings_padded, num_subj_slices \
+                = self.get_sample_elements_from_batch(dset.load_subject_data(i, source_t))
+            images, num_subj_slices = images.cuda()[None], num_subj_slices.cuda()[None]
+            B, S, H, W = images.shape
+            full_indices, coord_max, coord_min = full_indices.cuda()[None], coord_max.cuda()[None], coord_min.cuda()[None]
+            aff_params_padded, spacings_padded, flippings_padded = aff_params_padded.cuda()[None], spacings_padded.cuda()[None], flippings_padded.cuda()[None]
+            full_indices_ = full_indices.reshape(S, -1, full_indices.shape[-1])
+            slice_idx_ = full_indices_[..., :1]
+            voxel_indices_ = torch.cat((full_indices_[..., 1:3], torch.zeros_like(full_indices_[..., :1]),
+                                       torch.full_like(full_indices_[..., :1], source_t)), dim=-1).float()
+            for s in range(num_subj_slices.item()):
+                voxel_indices_s_ = voxel_indices_[s].reshape(1, -1, 4)
+                slice_idx_s_ = slice_idx_[s].reshape(1, -1, 1)
+                with torch.no_grad():
+                    pred_vals_, pred_seg_, *_ = self.forward(
+                        voxel_indices_s_, aff_params_padded,
+                        spacings_padded, flippings_padded,
+                        slice_idx_s_,
+                        coord_min, coord_max,
+                        latent_params=latent_params,
+                        aff_def_params=aff_def_params,
+                        return_deriv=False,
+                        use_target_net=True)
+                self.regist_val_cache[i, s, :H, :W] = (pred_vals_.reshape(H, W) * 255).to(torch.uint8)
+                self.regist_seg_cache[i, s, :H, :W] = pred_seg_.argmax(-1).reshape(H, W)
+
+
     def on_train_epoch_start(self):
+        if self.current_epoch % self.regist_target_update_rate == 0:
+            # Copy weights to target net
+            self.target_network.load_state_dict(self.canonical_inr.state_dict())
+            self.cache_ED_predictions()
+        if self.current_epoch < self.regist_task_start_epoch:
+            reinit = init.xavier_uniform_(self.canonical_inr.state_dict()['out.weight'][-3:]) * self.regist_weights_std
+            self.canonical_inr.state_dict()['out.weight'][-3:] = reinit
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
-            dset_str = 'train'
-            dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-            # for i in range(0, min(len(dset), 8)):
-            for i in range(0, 8):
-                batch = tuple(b[None].cuda() for b in dset[i])
-                latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
-                self.log_images(i, dset, mode=dset_str,
-                                latent_params=latent_params,
-                                aff_def_params=aff_def_params,
-                                intens_scale_params=intens_scale_params)
-                self.log_volume(i, dset, mode=dset_str,
-                                latent_params=latent_params,
-                                aff_def_params=aff_def_params)
-        if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
-            dset_str = 'val'
-            dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-            for i in range(0, len(dset)):
-                latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-                optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
-                    = self.inference(i, dset,
-                                     latent_params=latent_params,
-                                     aff_def_params=aff_def_params,
-                                     intens_scale_params=intens_scale_params)
-                if not self.logging_wandb_disabled:
-                    wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-                    wandb.log({f'{dset_str}/inf_best_score': best_score})
-                self.log_images(i, dset, mode=dset_str,
-                                latent_params=optimized_latent,
-                                aff_def_params=optimized_affine_def,
-                                intens_scale_params=optimized_intensity_def)
-                self.log_volume(i, dset, mode=dset_str,
-                                latent_params=optimized_latent,
-                                aff_def_params=optimized_affine_def)
+            self.do_logging()
+
+    def do_logging(self):
+        dset_str = 'train'
+        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        # for i in range(0, min(len(dset), 8)):
+        for i in range(0, 2):
+            batch = tuple(b[None].cuda() for b in dset[i])
+            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
+            self.log_images(i, dset, mode=dset_str,
+                            latent_params=latent_params,
+                            aff_def_params=aff_def_params,
+                            intens_scale_params=intens_scale_params)
+            self.log_volume(i, dset, mode=dset_str,
+                            latent_params=latent_params,
+                            aff_def_params=aff_def_params)
+    #     dset_str = 'val'
+    #     dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+    #     for i in range(0, len(dset)):
+    #         latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+    #         optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+    #             = self.inference(i, dset,
+    #                              latent_params=latent_params,
+    #                              aff_def_params=aff_def_params,
+    #                              intens_scale_params=intens_scale_params)
+    #         if not self.logging_wandb_disabled:
+    #             wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+    #             wandb.log({f'{dset_str}/inf_best_score': best_score})
+    #         self.log_images(i, dset, mode=dset_str,
+    #                         latent_params=optimized_latent,
+    #                         aff_def_params=optimized_affine_def,
+    #                         intens_scale_params=optimized_intensity_def)
+    #         self.log_volume(i, dset, mode=dset_str,
+    #                         latent_params=optimized_latent,
+    #                         aff_def_params=optimized_affine_def)
 
     def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
         return CardiacUKBBValidation([dset.data_paths[subj_idx]],
@@ -544,7 +616,7 @@ class INR_AutoReg(pl.LightningModule):
             # Recon loss
             loss_recon = self.psnr_loss(values_pred, values_deform)
             # Segmentation metrics
-            seg_pred, segs = torch.softmax(seg_pred, -1) * gt_avail[..., None], seg_gt * gt_avail[..., None]
+            seg_pred, segs = seg_pred * gt_avail[..., None], seg_gt * gt_avail[..., None]
             loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1, 1), segs.moveaxis(-1, 1)).mean(-1).mean(0)
             dice_per_class = 1 - loss_seg_per_class
             # Seg loss is only supervized if user explicitly wants to
@@ -677,6 +749,7 @@ class INR_AutoReg(pl.LightningModule):
 
                 pred_img = pred_vals_.reshape(H, W)
                 psnr_metric = kornia.metrics.psnr(pred_img, images[0,s,...], max_val=1.0)
+                pred_img_diff = (pred_img - images[0, s]).abs()
                 psnrs[s].append(psnr_metric.mean().detach().cpu().item())
                 ssim_metric = kornia.metrics.ssim(pred_img[None, None], images[:,s,None,...], window_size=11, max_val=1.0)
                 ssims[s].append(ssim_metric.mean().detach().cpu().item())
@@ -685,6 +758,7 @@ class INR_AutoReg(pl.LightningModule):
                 preds[s].append(pred)
                 pred_seg = pred_seg_.reshape(H, W, pred_seg_.shape[-1])
                 pred_seg_argmax = pred_seg.argmax(-1)
+                pred_seg_diff = (pred_seg_argmax != seg_argmax[0,s]).to(torch.float32)
                 segs[s].append(pred_seg_argmax.cpu().numpy().astype(np.uint8))
                 seg_gt = to_1hot(seg_argmax[0,s].reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 pred_seg_1hot = to_1hot(pred_seg_argmax.reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
@@ -732,62 +806,52 @@ class INR_AutoReg(pl.LightningModule):
                 pred_img_no_def_diff = torch.stack([pred_img_no_def_diff.abs()] * 3, dim=0)
 
                 # Registration
-                target_values_pred_, target_seg_pred_, target_coords_ = self.forward_registration(
-                    latent_params, pred_deform_, world_coords_)
-                # deform = voxel_indices_.clone().reshape(*pred_img.shape, -1)
-                # deform[pred_img.shape[0]//2:, pred_img.shape[1]//2:, 2] += 5
-                # # deform += 1
-                # deform_ = deform.reshape(world_coords_.shape)
-                # deform_w_ = self.forward_coord_model(deform_, aff_params_padded,
-                #                                      spacings_padded, flippings_padded,
-                #                                      slice_idx_,
-                #                                      coord_min, coord_max,
-                #                                      aff_def_params=aff_def_params,
-                #                                      inverse=False)
-                # from sa_la_interp import interpolate_sa_segs_to_la
-                # a = interpolate_sa_segs_to_la(
-                #     [seg_argmax[0, s, ..., None, None].cpu().numpy() for s in range(num_subj_slices.item())],
-                #     [images[0, s, ..., None, None].cpu().numpy() for s in range(num_subj_slices.item())],
-                #     [params_to_mat(aff_params_padded[:, s], spacings_padded[:, s],
-                #                    flippings_padded[:, s]).cpu().numpy()[0] for s in range(num_subj_slices.item())],
-                #     None, None,
-                #     self.min_max_unnormalize(world_coords_, coord_min[:, None], coord_max[:, None], self.norm_min, self.norm_max
-                #                              ).reshape(*pred_img.shape, 4)[..., None, :3].cpu().numpy(),
-                #     )
-                # pred_deform_w_ = deform_w_ - world_coords_
-                pred_deform_w_ = torch.zeros_like(world_coords_)
-                pred_deform_w_[...,1] = 0.3
-
-                # pred_deform[pred_img.shape[0]//2:, pred_img.shape[1]//2:, -2] = 0.1
-                # pred_deform_ = pred_deform.reshape(pred_deform_.shape)
-                target_coords_ = world_coords_.clone()
-                target_coords_[...,:3] += pred_deform_w_[...,:3]
-                deformed_coords_image_ = self.forward_coord_model(target_coords_, aff_params_padded,
+                source_values_pred_, source_seg_pred_, target_values_pred_, target_seg_pred_, target_coords_ \
+                    = self.forward_registration(latent_params, pred_deform_, world_coords_)
+                deformed_coords_image_space_ = self.forward_coord_model(target_coords_, aff_params_padded,
                                                                   spacings_padded, flippings_padded,
                                                                   slice_idx_,
                                                                   coord_min, coord_max,
                                                                   aff_def_params=aff_def_params,
                                                                   inverse=True)
-                deform_pred_image_ = deformed_coords_image_ - voxel_indices_
-                deform_pred_image = deform_pred_image_.reshape(*pred_img.shape, 4)
+                deform_pred_image_space_ = deformed_coords_image_space_ - voxel_indices_
+                deform_pred_image_space = deform_pred_image_space_.reshape(*pred_img.shape, 4)
                 quiver_image = draw_3d_vectors_on_image(images[0, s].cpu().numpy(),
-                                                        deform_pred_image[..., :3].cpu().numpy())
-                quiver_image = torch.tensor(quiver_image, dtype=torch.float32, device=pred_img.device) / 255.
+                                                        deform_pred_image_space[..., :3].cpu().numpy())
+                quiver_image = torch.tensor(quiver_image, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
                 target_values_pred = target_values_pred_.reshape(pred_img.shape)
-                regist_values_diff = (target_values_pred - pred_img).abs()
+                source_values_pred = source_values_pred_.reshape(pred_img.shape)
+                quiver_image_pred = draw_3d_vectors_on_image(source_values_pred.cpu().numpy(),
+                                                        deform_pred_image_space[..., :3].cpu().numpy())
+                quiver_image_pred = torch.tensor(quiver_image_pred, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
+                regist_values_diff = (target_values_pred - source_values_pred).abs()
                 regist_values_diff = torch.stack([regist_values_diff]*3, dim=0)
-                target_seg_pred = target_seg_pred_.reshape(*pred_img.shape, -1)
-                regist_seg_diff = (target_seg_pred.argmax(-1) != pred_seg.argmax(-1))
+                target_seg_pred_argmax = target_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
+                source_seg_pred_argmax = source_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
+                regist_seg_diff = (target_seg_pred_argmax != source_seg_pred_argmax)
                 regist_seg_diff = torch.stack([regist_seg_diff]*3, dim=0)
                 target_values_pred = torch.stack([target_values_pred]*3, dim=0).to(torch.float32)
+                pred_img_diff = torch.stack([pred_img_diff]*3, dim=0).to(torch.float32)
+                pred_seg_diff = torch.stack([pred_seg_diff]*3, dim=0).to(torch.float32)
+                images_ed = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))[0]
+                target_seg_frames = torch.stack([images_ed[s]]*3, 0).to(target_seg_pred_argmax.device)
+                target_seg_mask = torch.stack([target_seg_pred_argmax == 1] * 3, dim=0)
+                red = torch.tensor((1.0, 0.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                green = torch.tensor((0.0, 1.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                blue = torch.tensor((0.0, 1.0, 1.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                target_seg_frames = torch.where(target_seg_mask, red, target_seg_frames)
+                target_seg_mask = torch.stack([target_seg_pred_argmax == 2] * 3, dim=0)
+                target_seg_frames = torch.where(target_seg_mask, green, target_seg_frames)
+                target_seg_mask = torch.stack([target_seg_pred_argmax == 3] * 3, dim=0)
+                target_seg_frames = torch.where(target_seg_mask, blue, target_seg_frames)
 
                 col_img = torch.cat([img, seg_frames], dim=1)
-                col_d = torch.cat([images_dt_norm_abs, pred_img_dt, pred_img_int_scale_undo, pred_img_no_def_diff], dim=1)
-                col_regist = torch.cat([target_values_pred, quiver_image, regist_values_diff, regist_seg_diff], dim=1)
-                frame = torch.cat([col_img, col_d, col_regist], dim=2)
+                col_d = torch.cat([images_dt_norm_abs, pred_img_dt, pred_img_diff, pred_seg_diff], dim=1)
+                col_regist = torch.cat([target_values_pred, quiver_image, target_seg_frames, regist_seg_diff], dim=1)
+                col_regist2 = torch.cat([regist_values_diff, quiver_image_pred, pred_img_int_scale_undo, pred_img_no_def_diff], dim=1)
+                frame = torch.cat([col_img, col_d, col_regist, col_regist2], dim=2)
                 frame = frame.clip(0.0, 1.0)
                 frame = (frame * 255).cpu().numpy().astype(np.uint8)
-                a = np.moveaxis(frame, 0, -1)
                 videos[s].append(frame)
         videos = [np.stack(v, 0) for v in videos if v]
 
@@ -880,10 +944,10 @@ class INR_AutoReg(pl.LightningModule):
                 pred_vals_ = pred_vals_.clip(0.0, 1.0)
                 pred_val = pred_vals_.reshape(c_z.shape[:-1])
                 pred_def = pred_def_.reshape(*c_z.shape[:-1], 3)
-                pred_def_scale = pred_def * res_tensor.to(pred_def.device)
+                pred_def_scale = pred_def * res_tensor.to(pred_def.device)/2
                 quiver_image = draw_3d_vectors_on_image(pred_val.cpu().numpy(),
-                                                        pred_def_scale[...,0, :].cpu().numpy())
-                quiver_image = quiver_image[...,None]
+                                                        pred_def_scale[...,0, :].cpu().numpy(), upscale_factor=5)
+                quiver_image = np.moveaxis(quiver_image, -1, 0)[...,None]
                 pred_seg = pred_seg.cpu().numpy()
                 pred_seg = pred_seg.astype(np.uint8)
                 pred_val = pred_val.cpu().numpy()
@@ -894,10 +958,10 @@ class INR_AutoReg(pl.LightningModule):
                 z_seg_slices.append(pred_seg)
                 z_def_slices.append(pred_def)
                 z_def_quiver_slices.append(quiver_image)
-            pred_im_t = np.concatenate(z_im_slices, 2)
-            pred_seg_t = np.concatenate(z_seg_slices, 2)
-            pred_def_t = np.concatenate(z_def_slices, 3)
-            pred_def_quiver_t = np.concatenate(z_def_quiver_slices, 3)
+            pred_im_t = np.concatenate(z_im_slices, -1)
+            pred_seg_t = np.concatenate(z_seg_slices, -1)
+            pred_def_t = np.concatenate(z_def_slices, -2)
+            pred_def_quiver_t = np.concatenate(z_def_quiver_slices, -1)
             ims.append(pred_im_t)
             segs.append(pred_seg_t)
             defs.append(pred_def_t)
@@ -920,9 +984,9 @@ class INR_AutoReg(pl.LightningModule):
         # Voxel (0,0,0) -> (domain_min, domain_min, domain_min)
         spacing = (self.norm_max - self.norm_min) / (res_tensor - 1)  # voxel spacing along each axis
         aff = np.array([
-            [spacing, 0, 0, self.norm_min],
-            [0, spacing, 0, self.norm_min],
-            [0, 0, spacing, self.norm_min],
+            [spacing[0], 0, 0, self.norm_min],
+            [0, spacing[1], 0, self.norm_min],
+            [0, 0, spacing[2], self.norm_min],
             [0, 0, 0, 1]
         ], dtype=np.float32)
         save_dir_pred = save_dir / 'pred'
@@ -934,7 +998,8 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_gt.mkdir(exist_ok=True)
 
         for i in range(gt_images.shape[0]):
-            aff = params_to_mat(aff_params_padded[i] + aff_def_params[0, i], torch.ones_like(spacings_padded[i][None]), flippings_padded[i][None])
+            param = aff_params_padded[i] + aff_def_params[0, i].cpu()
+            aff = params_to_mat(param[None], torch.ones_like(spacings_padded[i][None]), flippings_padded[i][None])
             aff = aff[0].cpu().numpy()
             array_to_nifti(str(save_dir_gt / f"slice{i}.nii.gz"), gt_images[i, ..., None, None].numpy().astype(np.int32), aff)
             array_to_nifti(str(save_dir_gt / f"slice{i}_seg.nii.gz"), gt_segs[i, ..., None, None].numpy().astype(np.int32), aff)
@@ -942,7 +1007,7 @@ class INR_AutoReg(pl.LightningModule):
         slice_indices = range(20, res[2] - 20, res[2] // 10)
         ims_rgb = np.stack([ims]*3, axis=0)
         segs_rgb = (np.stack([segs]*3, axis=0) / 4 * 255).astype(np.uint8)
-        content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :], defs[...,i,:]), 2) for i in slice_indices]
+        content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :], def_quivers[...,i, :]), 2) for i in slice_indices]
         content = [np.moveaxis(c, -1, 0) for c in content]
         # Save series to file as mp4
         for v, i in zip(content, slice_indices):

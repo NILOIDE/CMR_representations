@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 from dataclasses import dataclass
@@ -5,6 +6,7 @@ from pathlib import Path
 from typing import Tuple, List
 from datetime import datetime
 import tyro
+import torch
 
 from lightning import Trainer
 from lightning.pytorch.loggers import WandbLogger
@@ -24,13 +26,14 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (10, 100, 1000,)
+    addit_log_epochs: Tuple[int, ...] = (100, 1000, 5000, 6000, 15000)
+    # addit_log_epochs: Tuple[int, ...] = (10100, 10500,12000, 15000)
     num_train: int = 100
     num_val: int = 10
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
-    num_coords: int = 50_000
+    num_coords: int = 70_000
     # Point spread function ------------------------------------------------------------
     point_spread_start_epoch: int = 20_000
     point_spread_size: int = 1
@@ -53,10 +56,13 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 5000
-    weight_loss_regist_recon: float = 1e0
-    weight_loss_regist_seg: float = 1e0
-    weight_loss_regist_reg: float = 1e-4
+    regist_task_start_epoch: int = 500
+    regist_target_update_rate: int = 100
+    regist_weights_std: float = 1e-3
+    weight_loss_regist_recon: float = 1e-1
+    weight_loss_regist_seg: float = 1e-1
+    weight_loss_regist_jac_reg: float = 1e-1
+    weight_loss_regist_mag_reg: float = 1e-1
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
@@ -77,7 +83,9 @@ class Params:
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
-
+    resume_checkpoint_path: str = ""
+    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251111-025819/checkpoints/epoch-epoch=009999.ckpt"
+    inference: bool = False
 
 def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -123,10 +131,13 @@ def main():
     log_path.mkdir(exist_ok=True)
     if params.use_conv:
         model = INR_Conv(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                         max_slices=data_module.get_max_slices(), log_path=log_path, **params.__dict__)
+                         max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
+                         log_path=log_path, **params.__dict__)
     else:
         model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                            max_slices=data_module.get_max_slices(), log_path=log_path, **params.__dict__)
+                            max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
+                            log_path=log_path, **params.__dict__)
+
 
     trainer = Trainer(
         logger=logger,
@@ -141,7 +152,8 @@ def main():
         num_sanity_val_steps=1,
     )
 
-    trainer.fit(model, datamodule=data_module)
+    ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
+    trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
 
 
 if __name__ == '__main__':

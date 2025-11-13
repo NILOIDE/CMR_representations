@@ -103,7 +103,7 @@ class CMRDataModule(pl.LightningDataModule):
                                            persistent_workers=self.num_workers > 0)
 
     def get_coord_size(self) -> int:
-        return self.train_dset.coord_size
+        return self.train_dset.get_coord_size()
 
     def extract_max_dims(self):
         if self.dim_max is not None:
