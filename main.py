@@ -26,7 +26,7 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (100, 1000, 5000, 6000, 15000)
+    addit_log_epochs: Tuple[int, ...] = (100, 1000, 5000,)
     # addit_log_epochs: Tuple[int, ...] = (10100, 10500,12000, 15000)
     num_train: int = 100
     num_val: int = 10
@@ -47,7 +47,7 @@ class Params:
     use_conv: bool = False
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
-    weight_reg_inr: float = 1e-5
+    weight_reg_inr: float = 0e-5
     weight_reg_aff: float = 1e-2
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
@@ -56,8 +56,7 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 5000
-    regist_target_update_rate: int = 100
+    regist_task_start_epoch: int = 1000000
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
@@ -108,6 +107,7 @@ def main():
                                 load_sa_dir=params.data_dir,
                                 preprocessed_store_path=params.preprocessed_h5_dir,
                                 replace_existing_preprocessed=params.replace_existing_preprocessed,
+                                log_path=model_path,
                                 num_train=params.num_train,
                                 num_val=params.num_val,
                                 num_test=params.num_test,

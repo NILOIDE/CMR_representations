@@ -65,8 +65,11 @@ class INR_AutoReg(pl.LightningModule):
         self.canonical_inr = MLP(self.pos_enc.out_dim + self.latent_size,
                                  num_hidden_layers=kwargs['num_hidden_layers'],
                                  hidden_size=kwargs['hidden_size'],
-                                 out_size=self.intensity_size + self.num_classes + (self.coord_size - 1))
-        self.target_network = copy.deepcopy(self.canonical_inr)
+                                 out_size=self.intensity_size + self.num_classes)
+        self.regist_inr = MLP(self.pos_enc.out_dim + self.latent_size,
+                                 num_hidden_layers=kwargs['num_hidden_layers']//2,
+                                 hidden_size=kwargs['hidden_size']//2,
+                                 out_size=self.coord_size-1)
 
         self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
         self.seg_loss = DiceLoss(softmax=False, reduction="none")
@@ -85,13 +88,11 @@ class INR_AutoReg(pl.LightningModule):
         self.weight_loss_regist_jac_reg = kwargs['weight_loss_regist_jac_reg']
         self.weight_loss_regist_mag_reg = kwargs['weight_loss_regist_mag_reg']
         self.regist_task_start_epoch = kwargs['regist_task_start_epoch']
-        self.regist_weights_std = kwargs['regist_weights_std']
-        self.regist_target_update_rate = kwargs['regist_target_update_rate']
         self.supervise_regist = self.weight_loss_regist_seg != 0 or self.weight_loss_regist_recon != 0
         # Target network prediction caches for ~10% speedup
         self.regist_cache_dims = kwargs['regist_cache_dims']
-        self.regist_val_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
-        self.regist_seg_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
+        # self.regist_val_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
+        # self.regist_seg_cache = torch.zeros((self.num_subjects, self.max_slices, *self.regist_cache_dims[:2]), dtype=torch.uint8, device="cuda")
         self.lr = kwargs["learning_rate"]
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
@@ -101,7 +102,7 @@ class INR_AutoReg(pl.LightningModule):
         self.inf_max_epochs = kwargs["inf_max_epochs"]
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
+        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents, *self.regist_inr.parameters()], lr=self.lr)
         opt_deform = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
         opt_intensity = torch.optim.Adam([self.intensity_scale_params], lr=self.lr_def)
         return opt_inr, opt_deform, opt_intensity
@@ -162,7 +163,7 @@ class INR_AutoReg(pl.LightningModule):
             source_coords = world_coords.clone()
             source_coords[..., -1] = source_t
             with torch.no_grad():
-                source_values_pred, source_seg_pred, _ = self.forward_inr(source_coords, latent_params, use_target_net=True)
+                source_values_pred, source_seg_pred, _ = self.forward_inr(source_coords, latent_params, return_def=False)
         else:
             B, N = slice_indices.shape[:2]
             b_idx_tile = torch.arange(B, dtype=torch.long, device=slice_indices.device)[:,None].tile(1, N)
@@ -173,7 +174,7 @@ class INR_AutoReg(pl.LightningModule):
             source_seg_pred = to_1hot(source_seg_pred, self.num_classes).reshape(B, N, -1)
         target_coords = world_coords.clone()
         target_coords[..., :3] += deform_pred
-        target_values_pred, target_seg_pred, _ = self.forward_inr(target_coords, latent_params, use_target_net=True)
+        target_values_pred, target_seg_pred, _ = self.forward_inr(target_coords, latent_params, return_def=False)
         return source_values_pred, source_seg_pred, target_values_pred, target_seg_pred, target_coords
 
     def compute_registration_losses(self,
@@ -224,14 +225,11 @@ class INR_AutoReg(pl.LightningModule):
                 latent_params: torch.Tensor,
                 aff_def_params: Optional[torch.Tensor] = None,
                 return_deriv: bool = False,
-                use_target_net: bool = False,
+                return_def: bool = True,
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-        # if return_deriv:
-        #     latent_params.requires_grad = True
-        #     aff_def_params.requires_grad = True
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 slice_idx, min_coords, max_coords, aff_def_params)
-        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params, use_target_net=use_target_net)
+        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params, return_def=return_def)
         values_pred_d = None
         if return_deriv:
             values_pred_d = torch.autograd.grad(values_pred, world_coords, grad_outputs=torch.ones_like(values_pred),
@@ -290,7 +288,7 @@ class INR_AutoReg(pl.LightningModule):
     def forward_inr(self,
                     coords: torch.Tensor,
                     subject_latent: torch.Tensor,
-                    use_target_net: bool = False) \
+                    return_def: bool = True) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # Make time dim cyclical
         coords = torch.cat((coords[..., :3],
@@ -301,17 +299,18 @@ class INR_AutoReg(pl.LightningModule):
         x = torch.cat((coords_enc, subject_latent), dim=-1)
         # Forward INR to obtain predicted volume values
         x_ = x.reshape((-1, x.shape[-1]))
-        if use_target_net:
-            values_pred_ = self.target_network(x_)
-        else:
-            values_pred_ = self.canonical_inr(x_)
+        values_pred_ = self.canonical_inr(x_)
         values_pred = values_pred_[:, 0].reshape((coords.shape[0], coords.shape[1]))
         values_pred = torch.sigmoid(values_pred)
         seg_pred = values_pred_[:, 1:5].reshape((coords.shape[0], coords.shape[1], 4))
         seg_pred = torch.softmax(seg_pred, -1)
-        regist_pred = values_pred_[:, 5:].reshape((coords.shape[0], coords.shape[1], 3))
+        if return_def:
+            deform_pred_ = self.regist_inr(x_)
+            deform_pred = deform_pred_.reshape((coords.shape[0], coords.shape[1], 3))
+        else:
+            deform_pred = torch.zeros_like(seg_pred[..., :3])
         # regist_pred = self.regist_network(x_).reshape((coords.shape[0], coords.shape[1], 3))
-        return values_pred, seg_pred, regist_pred
+        return values_pred, seg_pred, deform_pred
 
     def forward_intensity_params(self,
                                  coords_voxel: torch.Tensor,
@@ -348,6 +347,7 @@ class INR_AutoReg(pl.LightningModule):
                                   point_spread_size: int,
                                   point_spread_std: torch.Tensor,
                                   return_deriv: bool = False,
+                                  return_def: bool = True,
                                   ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         B, N, C = coords_voxel.shape
         coords_voxel_tile = coords_voxel[..., None, :].tile(1, 1, point_spread_size, 1)
@@ -364,7 +364,8 @@ class INR_AutoReg(pl.LightningModule):
                            min_coords, max_coords,
                            latent_params=latent_params,
                            aff_def_params=aff_def_params,
-                           return_deriv=return_deriv)
+                           return_deriv=return_deriv,
+                           return_def=return_def)
         values_pred = values_pred_.reshape(B, N, point_spread_size).mean(2)
         seg_pred = seg_pred_.reshape(B, N, point_spread_size, -1).mean(2)
         regist_pred = regist_pred_.reshape(B, N, point_spread_size, -1).mean(2)
@@ -401,7 +402,8 @@ class INR_AutoReg(pl.LightningModule):
             latent_params, aff_def_params,
             self.point_spread_size,
             self.point_spread_std,
-            return_deriv=self.supervise_deriv)
+            return_deriv=self.supervise_deriv,
+            return_def=self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch,)
         # Apply learnt intensity scaling to each slice
         values_deform = self.apply_intensity_scaling(values, coords_voxel, slice_idx, intens_scale_params)
         # Recon loss
@@ -417,7 +419,7 @@ class INR_AutoReg(pl.LightningModule):
         loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg = 0.0, 0.0, 0.0, 0.0, 0.0
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
             loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg = self.compute_registration_losses(
-                latent_params, deform_pred, world_coords, subject_idx, coords_voxel, slice_idx)
+                latent_params, deform_pred, world_coords)#, subject_idx, coords_voxel, slice_idx)
             loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_jac_reg + loss_regist_mag_reg
         # Recon derivative loss (if user decided to supervise it)
         loss_dt = 0.0
@@ -498,13 +500,12 @@ class INR_AutoReg(pl.LightningModule):
 
 
     def on_train_epoch_start(self):
-        if self.current_epoch % self.regist_target_update_rate == 0:
-            # Copy weights to target net
-            self.target_network.load_state_dict(self.canonical_inr.state_dict())
-            self.cache_ED_predictions()
-        if self.current_epoch < self.regist_task_start_epoch:
-            reinit = init.xavier_uniform_(self.canonical_inr.state_dict()['out.weight'][-3:]) * self.regist_weights_std
-            self.canonical_inr.state_dict()['out.weight'][-3:] = reinit
+        # if self.current_epoch % self.regist_target_update_rate == 0:
+        #     # Copy weights to target net
+        #     self.cache_ED_predictions()
+        # if self.current_epoch < self.regist_task_start_epoch:
+        #     reinit = init.xavier_uniform_(self.canonical_inr.state_dict()['out.weight'][-3:]) * self.regist_weights_std
+        #     self.canonical_inr.state_dict()['out.weight'][-3:] = reinit
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             self.do_logging()
 

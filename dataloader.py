@@ -27,6 +27,7 @@ class CMRDataModule(pl.LightningDataModule):
                  load_la_dir: str,
                  load_sa_dir: str,
                  preprocessed_store_path: str,
+                 log_path: str,
                  num_train: int = 100,
                  num_val: int = 8,
                  num_test: int = 1,
@@ -36,11 +37,12 @@ class CMRDataModule(pl.LightningDataModule):
                  batch_size: int = 32,
                  num_coords: int = 4000,
                  inf_num_coords: int = 4000,
-                 num_workers: int = 0):
+                 num_workers: int = 0,):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
+        self.log_path = log_path
         self.train_dset_class = CardiacUKBBFullImage if full_seq_dataset else CardiacUKBB
         self.test_dset_class = CardiacUKBBValidationFullImage if full_seq_dataset else CardiacUKBBValidation
         self.crop_around_heart = crop_around_heart
@@ -77,6 +79,7 @@ class CMRDataModule(pl.LightningDataModule):
             with open(pickle_name, 'wb') as handle:
                 pickle.dump(subject_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
         assert len(subject_data) == num_subjects
+        shutil.copy(pickle_name, Path(self.log_path) / pickle_name)
         self.subject_data = subject_data
         split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
         train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
