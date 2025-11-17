@@ -120,6 +120,8 @@ def main():
     os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
+    print('Params', params)
+    print('Model path:', model_path)
 
     checkpoint_path = model_path / 'checkpoints'
     checkpoint_path.mkdir(exist_ok=True)
@@ -137,8 +139,6 @@ def main():
         model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
                             max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
                             log_path=log_path, **params.__dict__)
-
-
     trainer = Trainer(
         logger=logger,
         callbacks=[checkpoint_callback],
