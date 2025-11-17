@@ -81,15 +81,16 @@ class CMRDataModule(pl.LightningDataModule):
         assert len(subject_data) == num_subjects
         shutil.copy(pickle_name, Path(self.log_path) / pickle_name)
         self.subject_data = subject_data
-        split = (self.num_train / num_subjects, self.num_val / num_subjects, self.num_test / num_subjects)
-        train_idxs, val_idxs, test_idxs = [list(s) for s in random_split(list(range(len(self.subject_data))), split)]
-        self.train_dset = self.train_dset_class([self.subject_data[i] for i in train_idxs][:],
+        train_paths = subject_data[:self.num_train]
+        val_paths = subject_data[self.num_train:self.num_train+self.num_val]
+        test_paths = subject_data[self.num_train+self.num_val:self.num_train+self.num_val+self.num_test]
+        self.train_dset = self.train_dset_class(train_paths[:],
                                                 num_coords=self.num_coords, max_slices=self.get_max_slices(),
                                                 max_slice_shape=self.get_max_slice_shape())
-        self.val_dset = self.test_dset_class([self.subject_data[i] for i in val_idxs],
+        self.val_dset = self.test_dset_class(val_paths[:],
                                              num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
                                              max_slice_shape=self.get_max_slice_shape())
-        self.test_dset = self.test_dset_class([self.subject_data[i] for i in test_idxs],
+        self.test_dset = self.test_dset_class(test_paths[:],
                                               num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
                                               max_slice_shape=self.get_max_slice_shape())
         self.data_prepared = True

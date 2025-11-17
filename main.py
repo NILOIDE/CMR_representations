@@ -26,7 +26,7 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (100, 1000, 5000,)
+    addit_log_epochs: Tuple[int, ...] = (16000, 18000)
     # addit_log_epochs: Tuple[int, ...] = (10100, 10500,12000, 15000)
     num_train: int = 100
     num_val: int = 10
@@ -40,15 +40,15 @@ class Params:
     point_spread_std: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
-    hidden_size: int = 256
+    hidden_size: int = 128
     latent_size: int = 128
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Conv latent prediction -------------------------------------------------------------------
     use_conv: bool = False
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
-    weight_reg_inr: float = 0e-5
-    weight_reg_aff: float = 1e-2
+    weight_reg_inr: float = 1e-5
+    weight_reg_aff: float = 1e-4
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
@@ -56,7 +56,8 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 1000000
+    regist_task_start_epoch: int = 15000
+    regist_target_update_rate: int = 500
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
@@ -78,12 +79,12 @@ class Params:
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
-    job_name: str = ''
+    job_name: str = 'foundation'
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
     resume_checkpoint_path: str = ""
-    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251111-025819/checkpoints/epoch-epoch=009999.ckpt"
+    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251115-033147-foundation/checkpoints/epoch-epoch=014999.ckpt"
     inference: bool = False
 
 def main():
@@ -97,7 +98,7 @@ def main():
 
     model_path_parent = Path(params.trained_models_dir)
     model_path_parent.mkdir(exist_ok=True)
-    model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + params.job_name)
+    model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + (f'-{params.job_name}' if params.job_name else ""))
     model_path.mkdir(exist_ok=True)
     with open(str(model_path / "params.json"), "w") as f:
         json.dump(params.__dict__, f, indent=4)
