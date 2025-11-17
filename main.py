@@ -56,7 +56,7 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 1000000
+    regist_task_start_epoch: int = 10000000
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
