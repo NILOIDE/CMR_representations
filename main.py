@@ -48,7 +48,7 @@ class Params:
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 0e-5
-    weight_reg_aff: float = 1e-2
+    weight_reg_aff: float = 1e-4
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
