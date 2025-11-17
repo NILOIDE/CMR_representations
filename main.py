@@ -97,7 +97,7 @@ def main():
 
     model_path_parent = Path(params.trained_models_dir)
     model_path_parent.mkdir(exist_ok=True)
-    model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + params.job_name)
+    model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + (f'-{params.job_name}' if params.job_name else ""))
     model_path.mkdir(exist_ok=True)
     with open(str(model_path / "params.json"), "w") as f:
         json.dump(params.__dict__, f, indent=4)

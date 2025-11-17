@@ -922,7 +922,7 @@ class INR_AutoReg(pl.LightningModule):
                    aff_def_params: torch.Tensor,
                    video_duration: float = 4,
                    mode="train",
-                   res=(200, 200, 200)):
+                   res=(300, 300, 300)):
         res_tensor = torch.tensor(res, dtype=torch.float32)
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
@@ -931,7 +931,8 @@ class INR_AutoReg(pl.LightningModule):
         segs = []
         defs = []
         def_quivers = []
-        for t in tqdm.tqdm(range(0, 50, 5), desc=f"Logging {mode} volume for subject {subj_idx} (UKBB id: {subj_id})"):
+        tds = 5
+        for t in tqdm.tqdm(range(0, 50, tds), desc=f"Logging {mode} volume for subject {subj_idx} (UKBB id: {subj_id})"):
             t_norm = t / 50
             c = torch.concatenate((coords, torch.full((*res, 1), t_norm)), dim=-1).cuda()
             z_im_slices = []
@@ -977,7 +978,7 @@ class INR_AutoReg(pl.LightningModule):
         gt_images, _, gt_segs, _, full_indices, coord_max, coord_min, \
             aff_params_padded, spacings_padded, flippings_padded, _ \
                 = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))
-        save_dir = self.log_path / f"{mode}_volumes" / str(subj_id)
+        save_dir = self.log_path / f"{mode}_volumes" / f"epoch_{self.current_epoch}" / str(subj_id)
         save_dir.parent.parent.mkdir(exist_ok=True)
         save_dir.parent.mkdir(exist_ok=True)
         save_dir.mkdir(exist_ok=True)
@@ -994,16 +995,27 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_pred.mkdir(exist_ok=True)
         array_to_nifti(str(save_dir_pred / f"full.nii.gz"), ims.astype(np.int32), aff)
         array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), segs.astype(np.int32), aff)
-        array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), defs.astype(float), aff)
-        save_dir_gt = save_dir.parent / "gt"
-        save_dir_gt.mkdir(exist_ok=True)
+        array_to_nifti(str(save_dir_pred / f"full_def.nii.gz"), defs.astype(float), aff)
 
+        save_dir_gt = save_dir / "gt"
+        save_dir_gt.mkdir(exist_ok=True)
         for i in range(gt_images.shape[0]):
+            gt_im_frames, gt_seg_frames = [], []
+            for t in range(0, 50, tds):
+                gt_images, _, gt_segs, _, full_indices, coord_max, coord_min, \
+                    aff_params_padded, spacings_padded, flippings_padded, _ \
+                    = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, t))
+                gt_images = (gt_images * 255).to(torch.uint8)
+                gt_segs = gt_segs.to(torch.uint8)
+                gt_im_frames.append(gt_images)
+                gt_seg_frames.append(gt_segs)
+            gt_im_frames = torch.stack(gt_im_frames, -1).unsqueeze(-2)
+            gt_seg_frames = torch.stack(gt_seg_frames, -1).unsqueeze(-2)
             param = aff_params_padded[i] + aff_def_params[0, i].cpu()
             aff = params_to_mat(param[None], torch.ones_like(spacings_padded[i][None]), flippings_padded[i][None])
             aff = aff[0].cpu().numpy()
-            array_to_nifti(str(save_dir_gt / f"slice{i}.nii.gz"), gt_images[i, ..., None, None].numpy().astype(np.int32), aff)
-            array_to_nifti(str(save_dir_gt / f"slice{i}_seg.nii.gz"), gt_segs[i, ..., None, None].numpy().astype(np.int32), aff)
+            array_to_nifti(str(save_dir_gt / f"slice{i}.nii.gz"), gt_im_frames[i].numpy().astype(np.int32), aff)
+            array_to_nifti(str(save_dir_gt / f"slice{i}_seg.nii.gz"), gt_seg_frames[i].numpy().astype(np.int32), aff)
 
         slice_indices = range(20, res[2] - 20, res[2] // 10)
         ims_rgb = np.stack([ims]*3, axis=0)
@@ -1011,9 +1023,10 @@ class INR_AutoReg(pl.LightningModule):
         content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :], def_quivers[...,i, :]), 2) for i in slice_indices]
         content = [np.moveaxis(c, -1, 0) for c in content]
         # Save series to file as mp4
+        save_dir_gt = save_dir / "mp4"
+        save_dir_gt.mkdir(exist_ok=True)
         for v, i in zip(content, slice_indices):
-            video_array_to_file(v, save_dir / f"epoch_{self.current_epoch:06d}_subj_{subj_idx}_slice_{i:02d}-{res[2]}.mp4",
-                                video_duration=2.0)
+            video_array_to_file(v, save_dir / f"slice_{i:03d}-{res[2]}.mp4", video_duration=2.0)
         # Log to WANDB
         if not self.logging_wandb_disabled:
             # Log video slices
