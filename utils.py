@@ -486,7 +486,9 @@ def video_array_to_file(array: Union[np.ndarray, torch.Tensor],
         array = array.numpy()
 
     # Convert to uint8 range [0, 255]
-    array = (array * 255).astype(np.uint8)
+    if any([array.dtype == i for i in {np.float32, np.float64, float}]):
+        assert not np.any(array > 1.0)
+        array = (array * 255).astype(np.uint8)
     T, C, H, W = array.shape
     assert C in {1,3}, 'Channel dim should be of size 1 or 3'
 
