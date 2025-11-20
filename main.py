@@ -25,9 +25,8 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
-    logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (100, 1000, 5000,)
-    # addit_log_epochs: Tuple[int, ...] = (10100, 10500,12000, 15000)
+    logging_rate: int = 2_000
+    addit_log_epochs: Tuple[int, ...] = (100, 1000,)
     num_train: int = 100
     num_val: int = 10
     num_test: int = 1
@@ -35,9 +34,11 @@ class Params:
     batch_size: int = 4
     num_coords: int = 70_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 20_000
-    point_spread_size: int = 1
-    point_spread_std: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
+    point_spread_start_epoch: int = 60_000
+    point_spread_size: int = 16
+    num_coords_during_point_spread: int = 35000
+    point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
+    point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
@@ -47,7 +48,7 @@ class Params:
     use_conv: bool = False
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
-    weight_reg_inr: float = 0e-5
+    weight_reg_inr: float = 1e-5
     weight_reg_aff: float = 1e-4
     weight_reg_lat: float = 1e-4
     weight_reg_int_scale: float = 1e-2
@@ -56,7 +57,7 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 10000000
+    regist_task_start_epoch: int = 50_000
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
@@ -73,17 +74,17 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (6,6,6,5,5)
-    pe_anneal_max_iter: int = 50_000
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
+    pe_anneal_max_iter: int = 100_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
-    job_name: str = ''
+    job_name: str = 'long_train'
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
     resume_checkpoint_path: str = ""
-    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251111-025819/checkpoints/epoch-epoch=009999.ckpt"
+    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=029999.ckpt"
     inference: bool = False
 
 def main():
@@ -144,17 +145,18 @@ def main():
         callbacks=[checkpoint_callback],
         accelerator='gpu',
         devices=1,
-        max_epochs=params.max_epochs,
-        # check_val_every_n_epoch=params.check_val_every_n_epoch,
+        max_epochs=params.point_spread_start_epoch,
         fast_dev_run=False,
         limit_train_batches=1.0,
         limit_val_batches=1.0,
         num_sanity_val_steps=1,
     )
-
     ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
     trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
-
-
+    # Then continue with updated datasets ready for point-spread
+    trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
+    trainer.fit_loop.max_epochs = params.max_epochs
+    trainer.fit(model, datamodule=data_module)
+    # First train up until point-spread start epochs
 if __name__ == '__main__':
     main()

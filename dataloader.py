@@ -79,6 +79,7 @@ class CMRDataModule(pl.LightningDataModule):
             with open(pickle_name, 'wb') as handle:
                 pickle.dump(subject_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
         assert len(subject_data) == num_subjects
+        assert all([Path(i).exists() for i in subject_data])
         shutil.copy(pickle_name, Path(self.log_path) / pickle_name)
         self.subject_data = subject_data
         train_paths = subject_data[:self.num_train]
