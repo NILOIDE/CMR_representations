@@ -26,7 +26,7 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 2_000
-    addit_log_epochs: Tuple[int, ...] = (100, 1000,)
+    addit_log_epochs: Tuple[int, ...] = (100,500, 1000,)
     num_train: int = 100
     num_val: int = 10
     num_test: int = 1
@@ -57,7 +57,7 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 50_000
+    regist_task_start_epoch: int = 0
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
@@ -83,8 +83,8 @@ class Params:
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
-    resume_checkpoint_path: str = ""
-    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=029999.ckpt"
+    # resume_checkpoint_path: str = ""
+    resume_checkpoint_path: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models/20251117-162436-foundation/checkpoints/epoch-epoch=039999.ckpt"
     inference: bool = False
 
 def main():
@@ -151,8 +151,8 @@ def main():
         limit_val_batches=1.0,
         num_sanity_val_steps=1,
     )
-    ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
-    trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
+    # ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
+    trainer.fit(model, datamodule=data_module, ckpt_path=None)
     # Then continue with updated datasets ready for point-spread
     trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
     trainer.fit_loop.max_epochs = params.max_epochs

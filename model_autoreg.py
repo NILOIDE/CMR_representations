@@ -109,6 +109,11 @@ class INR_AutoReg(pl.LightningModule):
         self.inf_lr_aff = kwargs["inf_learning_rate_aff"]
         self.inf_lr_def = kwargs["inf_learning_rate_def"]
         self.inf_max_epochs = kwargs["inf_max_epochs"]
+        self.ckpt_path = kwargs['resume_checkpoint_path']
+        if self.ckpt_path:
+            p = torch.load(self.ckpt_path)
+            self.load_state_dict(p['state_dict'], strict=False)
+            self.target_net.load_state_dict(self.canonical_inr.state_dict())
 
     def configure_optimizers(self):
         opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
