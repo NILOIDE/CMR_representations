@@ -34,7 +34,7 @@ class Params:
     batch_size: int = 4
     num_coords: int = 70_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 60_000
+    point_spread_start_epoch: int = 999_000
     point_spread_size: int = 16
     num_coords_during_point_spread: int = 35000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
@@ -74,8 +74,8 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
-    pe_anneal_max_iter: int = 100_000
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (6,6,6,5,5)
+    pe_anneal_max_iter: int = 0
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths

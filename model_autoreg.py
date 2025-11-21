@@ -86,6 +86,7 @@ class INR_AutoReg(pl.LightningModule):
         self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
         self.seg_loss = DiceLoss(softmax=False, reduction="none")
         self.psnr_loss = kornia.losses.PSNRLoss(max_val=1.0)
+        self.mse_loss = torch.nn.MSELoss(reduction='none')
 
         self.weight_reg_inr = kwargs["weight_reg_inr"]
         self.weight_reg_aff = kwargs["weight_reg_aff"]
@@ -186,8 +187,8 @@ class INR_AutoReg(pl.LightningModule):
             source_deform_pred = self.forward_def_inr(source_world_coords, latent_params)
         source_inten_pred, source_seg_pred, target_inten_pred, target_seg_pred, target_coords \
              = self.forward_registration(source_world_coords, latent_params, source_deform_pred, source_t)
-        loss_recon = self.psnr_loss(target_inten_pred, source_inten_pred) * self.weight_loss_regist_recon
-        loss_seg = self.seg_loss(target_seg_pred.moveaxis(-1,1), source_seg_pred.moveaxis(-1,1)).mean() * self.weight_loss_regist_seg
+        loss_recon = self.mse_loss(source_inten_pred, target_inten_pred).mean() * self.weight_loss_regist_recon
+        loss_seg = self.seg_loss(source_seg_pred.moveaxis(-1,1), target_seg_pred.moveaxis(-1,1),).mean() * self.weight_loss_regist_seg
         jac_det_loss = self.compute_jacobian_determinant_loss(source_world_coords, source_deform_pred) * self.weight_loss_regist_jac_reg
         jac_mag_loss = (source_deform_pred*source_deform_pred).sum(-1).mean() * self.weight_loss_regist_mag_reg
         reg_def_weight_loss, _ = self.loss_reg_inr_params(self.regist_inr.parameters(), self.weight_reg_inr)
@@ -320,9 +321,9 @@ class INR_AutoReg(pl.LightningModule):
         B, N, F = net_input.shape
         x_ = net_input.reshape((-1, F))
         if use_target_net:
-            values_pred_ = self.canonical_inr(x_)
-        else:
             values_pred_ = self.target_net(x_)
+        else:
+            values_pred_ = self.canonical_inr(x_)
         values_pred = values_pred_[:, 0].reshape((B, N))
         values_pred = torch.sigmoid(values_pred)
         seg_pred = values_pred_[:, 1:5].reshape((B, N, self.num_classes))
@@ -472,6 +473,7 @@ class INR_AutoReg(pl.LightningModule):
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
             opt_regist.zero_grad()
+            opt_deform.zero_grad()
             world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                     slice_idx, min_coords, max_coords, aff_def_params)
             # Registration metrics_and loss
@@ -508,9 +510,6 @@ class INR_AutoReg(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self.target_net.load_state_dict(self.canonical_inr.state_dict())
-        # if self.current_epoch == 0:
-        #     p = torch.load(self.ckpt_path)
-        #     self.load_state_dict(p['state_dict'], strict=False)
         if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
             self.do_logging()
 
@@ -518,7 +517,7 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         # for i in range(0, min(len(dset), 8)):
-        for i in range(0, 2):
+        for i in range(0, 8):
             batch = tuple(b[None].cuda() for b in dset[i])
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
             self.log_images(i, dset, mode=dset_str,
