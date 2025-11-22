@@ -83,6 +83,9 @@ class INR_AutoReg(pl.LightningModule):
         reinit = init.xavier_uniform_(self.regist_inr.state_dict()['out.weight']) * self.regist_weights_std
         self.regist_inr.state_dict()['out.weight'] = reinit
 
+        self.reg_subj_latents = nn.Parameter(torch.randn((self.num_subjects, self.latent_size),
+                                                     dtype=torch.float32, device="cuda") * 1e-2, requires_grad=True)
+
         self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
         self.seg_loss = DiceLoss(softmax=False, reduction="none")
         self.psnr_loss = kornia.losses.PSNRLoss(max_val=1.0)
@@ -114,7 +117,7 @@ class INR_AutoReg(pl.LightningModule):
         opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
         opt_aff = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
         opt_intensity = torch.optim.Adam([self.intensity_scale_params], lr=self.lr_def)
-        opt_regist = torch.optim.Adam([*self.regist_inr.parameters(), self.subj_latents], lr=self.lr)
+        opt_regist = torch.optim.Adam([*self.regist_inr.parameters(), self.reg_subj_latents], lr=self.lr)
         return opt_inr, opt_aff, opt_intensity, opt_regist
 
     @staticmethod
@@ -914,8 +917,8 @@ class INR_AutoReg(pl.LightningModule):
             s = s.astype(np.int32)
             s = np.moveaxis(s[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s, aff)
-            d = np.moveaxis(d[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"def_slice_{i:02d}.nii.gz"), d, aff)
+            # d = np.moveaxis(d[..., None], 0, -1)
+            # array_to_nifti(str(save_dir_nif / f"def_slice_{i:02d}.nii.gz"), d, aff)
             gt = gt.astype(np.int32)
             gt = np.moveaxis(gt[..., None], 0, -1)
             array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt, aff)
@@ -1001,7 +1004,7 @@ class INR_AutoReg(pl.LightningModule):
         save_dir_pred.mkdir(exist_ok=True)
         array_to_nifti(str(save_dir_pred / f"full.nii.gz"), ims.astype(np.int32), aff)
         array_to_nifti(str(save_dir_pred / f"full_seg.nii.gz"), segs.astype(np.int32), aff)
-        array_to_nifti(str(save_dir_pred / f"full_def.nii.gz"), defs.astype(float), aff)
+        # array_to_nifti(str(save_dir_pred / f"full_def.nii.gz"), defs.astype(float), aff)
 
         save_dir_gt = save_dir / "gt"
         save_dir_gt.mkdir(exist_ok=True)

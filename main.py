@@ -25,20 +25,20 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = True
-    logging_rate: int = 2_000
+    logging_rate: int = 10_000
     addit_log_epochs: Tuple[int, ...] = (100, 1000,)
-    num_train: int = 100
-    num_val: int = 10
+    num_train: int = 20
+    num_val: int = 1
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 70_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 999_000
+    point_spread_start_epoch: int = 20_000
     point_spread_size: int = 16
     num_coords_during_point_spread: int = 35000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
-    point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
+    point_spread_std_after: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
@@ -57,7 +57,7 @@ class Params:
     weight_loss_seg: float = 1e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
     # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 50_000
+    regist_task_start_epoch: int = 999000
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
