@@ -47,7 +47,7 @@ class CardiacUKBB(Dataset):
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
             seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
             la_gt_available = torch.ones_like(seg, dtype=torch.bool)
-            la_gt_available[:3] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
+            la_gt_available[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
             # Get available non-padding indices in frame
             non_padding_indices = make_masked_coordinate_tensor(image_mask)
             # Add the time index to get the full volume index
@@ -139,7 +139,7 @@ class CardiacUKBBValidation(CardiacUKBB):
                 # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
                 self.image_mask[i, :S, :H, :W, :T] = torch.tensor(f['image_padded_mask'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.seg[i, :S, :H, :W, :T] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8).moveaxis(0, -1)
-                self.la_gt_available[i, :3, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
+                self.la_gt_available[i, :S, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.image_pad = self.image_pad[:,:,:H,:W]
                 self.image_dt = self.image_dt[:,:,:H,:W]
                 self.image_mask = self.image_mask[:,:,:H,:W]

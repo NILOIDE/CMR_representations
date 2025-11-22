@@ -83,6 +83,9 @@ class INR_AutoReg(pl.LightningModule):
         reinit = init.xavier_uniform_(self.regist_inr.state_dict()['out.weight']) * self.regist_weights_std
         self.regist_inr.state_dict()['out.weight'] = reinit
 
+        self.reg_subj_latents = nn.Parameter(torch.randn((self.num_subjects, self.latent_size),
+                                                     dtype=torch.float32, device="cuda") * 1e-2, requires_grad=True)
+
         self.class_weight = torch.tensor([i / sum(kwargs['weight_seg_class']) for i in kwargs['weight_seg_class']])
         self.seg_loss = DiceLoss(softmax=False, reduction="none")
         self.psnr_loss = kornia.losses.PSNRLoss(max_val=1.0)
@@ -119,7 +122,7 @@ class INR_AutoReg(pl.LightningModule):
         opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
         opt_aff = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
         opt_intensity = torch.optim.Adam([self.intensity_scale_params], lr=self.lr_def)
-        opt_regist = torch.optim.Adam([*self.regist_inr.parameters(), self.subj_latents], lr=self.lr)
+        opt_regist = torch.optim.Adam([*self.regist_inr.parameters(), self.reg_subj_latents], lr=self.lr)
         return opt_inr, opt_aff, opt_intensity, opt_regist
 
     @staticmethod
@@ -430,47 +433,48 @@ class INR_AutoReg(pl.LightningModule):
         opt_inr.zero_grad()
         opt_deform.zero_grad()
         opt_inten.zero_grad()
+        loss, loss_recon, loss_regul, loss_seg, loss_dt = 0.0,   0.0,   0.0,   0.0,   0.0,
 
         # Get batch elements
         (coords_voxel, values, values_dt, segs, gt_avail,
          aff_params, spacings, needs_flip, subject_idx, slice_idx,
          min_coords, max_coords, num_subj_slices) = self.get_sample_elements_from_batch(batch)
-        latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
+        # latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
         # Forward INR with coordinates
-        values_pred, seg_pred, _, values_pred_d, world_coords = self.forward_with_point_spread(
-            coords_voxel, aff_params,
-            spacings, needs_flip,
-            slice_idx,
-            min_coords, max_coords,
-            latent_params, aff_def_params,
-            1 if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size,
-            self.point_spread_std_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_std_after,
-            return_deriv=self.supervise_deriv,
-            return_def=False)
-        # Apply learnt intensity scaling to each slice
-        values_deform = self.apply_intensity_scaling(values, coords_voxel, slice_idx, intens_scale_params)
-        # Recon loss
-        loss_recon = self.psnr_loss(values_pred, values_deform)
-        # Seg metrics and loss
+        # values_pred, seg_pred, _, values_pred_d, world_coords = self.forward_with_point_spread(
+        #     coords_voxel, aff_params,
+        #     spacings, needs_flip,
+        #     slice_idx,
+        #     min_coords, max_coords,
+        #     latent_params, aff_def_params,
+        #     1 if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size,
+        #     self.point_spread_std_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_std_after,
+        #     return_deriv=self.supervise_deriv,
+        #     return_def=False)
+        # # Apply learnt intensity scaling to each slice
+        # values_deform = self.apply_intensity_scaling(values, coords_voxel, slice_idx, intens_scale_params)
+        # # Recon loss
+        # loss_recon = self.psnr_loss(values_pred, values_deform)
+        # # Seg metrics and loss
         loss_seg, dice_per_class = 0.0, torch.tensor((0.,0.,0.,0.))
-        if self.supervise_seg:
-            seg_pred, segs = seg_pred*gt_avail[...,None], segs*gt_avail[...,None]
-            loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
-            dice_per_class = 1 - loss_seg_per_class
-            loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
-        # Recon derivative loss (if user decided to supervise it)
-        loss_dt = 0.0
-        if self.supervise_deriv:
-            loss_dt = self.psnr_loss(values_pred_d[...,-1], values_dt*50) * self.weight_loss_deriv
-        # Regularization losses
+        # if self.supervise_seg:
+        #     seg_pred, segs = seg_pred*gt_avail[...,None], segs*gt_avail[...,None]
+        #     loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1,1), segs.moveaxis(-1,1)).mean(-1).mean(0)
+        #     dice_per_class = 1 - loss_seg_per_class
+        #     loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
+        # # Recon derivative loss (if user decided to supervise it)
+        # loss_dt = 0.0
+        # if self.supervise_deriv:
+        #     loss_dt = self.psnr_loss(values_pred_d[...,-1], values_dt*50) * self.weight_loss_deriv
+        # # Regularization losses
         loss_regul, loss_reg_dict = self.regularization_criterion(subject_idx)
-
-        # Backprop losses and update params
-        loss = loss_recon + loss_regul + loss_seg + loss_dt
-        self.manual_backward(loss)
-        opt_inr.step()
-        opt_inten.step()
-        opt_deform.step()
+        #
+        # # Backprop losses and update params
+        # loss = loss_recon + loss_regul + loss_seg + loss_dt
+        # self.manual_backward(loss)
+        # opt_inr.step()
+        # opt_inten.step()
+        # opt_deform.step()
 
         # Supervise deformations
         loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg, loss_regist_weight_reg \
@@ -478,7 +482,8 @@ class INR_AutoReg(pl.LightningModule):
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
             opt_regist.zero_grad()
-            opt_deform.zero_grad()
+            latent_params = self.reg_subj_latents[subject_idx]
+            # opt_deform.zero_grad()
             world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                     slice_idx, min_coords, max_coords, aff_def_params)
             # Registration metrics_and loss
@@ -487,7 +492,7 @@ class INR_AutoReg(pl.LightningModule):
             loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_jac_reg + loss_regist_mag_reg + loss_regist_weight_reg
             self.manual_backward(loss_regist)
             opt_regist.step()
-            opt_deform.step()
+            # opt_deform.step()
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
