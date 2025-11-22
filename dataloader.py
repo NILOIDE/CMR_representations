@@ -142,7 +142,7 @@ class CMRDataModule(pl.LightningDataModule):
         return self._test_dataloader
 
     def find_subjects(self, max_num=100, **kwargs):
-        count = 0
+
         images = []
         segs = []
         segs_auto = []
@@ -154,12 +154,12 @@ class CMRDataModule(pl.LightningDataModule):
         annotated_subjs = list(sorted([str(Path(self.load_la_dir) / i) for i in annotated_subj_ids]))
         assert all([Path(i).exists() for i in annotated_subjs])
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
-        subjects = annotated_subjs + [i for i in subjects if Path(i).name not in annotated_subj_ids]
+        subjects = annotated_subj_ids + [i for i in subjects if Path(i).name not in annotated_subj_ids]
         subjects = list(sorted(subjects))
         for i, parent in enumerate(subjects):
             if parent in {"1013493", "1439318"}:
                 continue
-            if count == max_num:
+            if len(segs) == max_num:
                 break
             # Images
             la_files = sorted(list(Path(os.path.join(self.load_la_dir, parent)).rglob('la*.nii.gz')))
@@ -170,7 +170,6 @@ class CMRDataModule(pl.LightningDataModule):
             if len(la_files) != 3 or len(sa_files) < 5:
                 continue
             slices = la_files + sa_files
-            images.append(slices)
             # Interp segmentations for masking slices where seg is not known.
             # Hopefully been interpolated before, else None (and will be interpolated).
             seg_la_interp_files = [Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_lv_la_2ch.nii.gz',
@@ -179,7 +178,6 @@ class CMRDataModule(pl.LightningDataModule):
             seg_sa_interp_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('interp_seg_sa*.nii.gz')))
             seg_interp_files = seg_la_interp_files + seg_sa_interp_files
             seg_interp_files = [str(x) for x in seg_interp_files]
-            interp_segs.append(seg_interp_files)
             # Segmentations
             seg_la_files_auto = [Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_2ch.nii.gz',
                             Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_3ch.nii.gz',
@@ -232,8 +230,10 @@ class CMRDataModule(pl.LightningDataModule):
             seg_files = [str(x) for x in seg_files]
             segs.append(seg_files)
             segs_auto.append(seg_files_auto)
-            count += 1
-        assert count == max_num
+            interp_segs.append(seg_interp_files)
+            images.append(slices)
+
+        assert len(segs) == max_num
         print(f"Found {len(images)} subjects.")
 
         subject_data_paths = self.preprocess_subject_data(images, segs, segs_auto, interp_segs, seg_categories)
