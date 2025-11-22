@@ -21,6 +21,8 @@ from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, \
     compute_3d_image_gradients, to_gif, nlm_denoise_multi_parallel
 
+UNCERTAIN, AUTO, HAND_ANNOTATED = 'uncertain', 'auto', 'hand_annotated'
+
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -143,8 +145,17 @@ class CMRDataModule(pl.LightningDataModule):
         count = 0
         images = []
         segs = []
-        la_interp_segs = []
+        segs_auto = []
+        interp_segs = []
+        seg_categories = []
+        annotated_subj_ids = [1009169, 1011525, 1012959, 1021869, 1026284, 1037010, 1037287, 1037527, 1043831, 1050481,
+                           1053004, 1059837, 1060134, 1060474,1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
+        annotated_subj_ids = [str(i) for i in annotated_subj_ids]
+        annotated_subjs = list(sorted([str(Path(self.load_la_dir) / i) for i in annotated_subj_ids]))
+        assert all([Path(i).exists() for i in annotated_subjs])
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
+        subjects = annotated_subjs + [i for i in subjects if Path(i).name not in annotated_subj_ids]
+        subjects = list(sorted(subjects))
         for i, parent in enumerate(subjects):
             if parent in {"1013493", "1439318"}:
                 continue
@@ -158,36 +169,78 @@ class CMRDataModule(pl.LightningDataModule):
             sa_files = [str(x) for x in sa_files]
             if len(la_files) != 3 or len(sa_files) < 5:
                 continue
-
-            # Segmentations. LA have hopefully been interpolated before, else None (and will be interpolated).
-            # LA segs are used for training masking.
-            seg_la_files = [Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_2ch.nii.gz',
-                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_3ch.nii.gz',
-                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_4ch.nii.gz']
+            slices = la_files + sa_files
+            images.append(slices)
+            # Interp segmentations for masking slices where seg is not known.
+            # Hopefully been interpolated before, else None (and will be interpolated).
             seg_la_interp_files = [Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_lv_la_2ch.nii.gz',
                                    Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_lv_la_3ch.nii.gz',
                                    Path(os.path.join(self.load_la_dir, parent)) / 'interp_seg_lv_la_4ch.nii.gz']
-            seg_la_files = [str(x) for x in seg_la_files]
-            seg_la_interp_files = [str(x) for x in seg_la_interp_files]
-            seg_sa_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('seg_sa*.nii.gz')))
-            seg_sa_files = [str(x) for x in seg_sa_files]
-            if not seg_sa_files:
+            seg_sa_interp_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('interp_seg_sa*.nii.gz')))
+            seg_interp_files = seg_la_interp_files + seg_sa_interp_files
+            seg_interp_files = [str(x) for x in seg_interp_files]
+            interp_segs.append(seg_interp_files)
+            # Segmentations
+            seg_la_files_auto = [Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_2ch.nii.gz',
+                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_3ch.nii.gz',
+                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_4ch.nii.gz']
+            seg_sa_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('seg_sa*')))
+            seg_sa_files_auto = [i for i in seg_sa_files if 'labels' not in i.name]
+            seg_files_auto = seg_la_files_auto + seg_sa_files_auto
+            if not seg_files_auto:
                 continue
 
-            slices = la_files + sa_files
-            images.append(slices)
-            seg_slices = seg_la_files + seg_sa_files
-            segs.append(seg_slices)
-            la_interp_segs.append(seg_la_interp_files)
+            # If hand-annotated files exist, pick them over auto-segmented ones.
+            seg_files = []
+            for i, p in enumerate(seg_files_auto):
+                hand_file = p.parent / (p.name[:-len('.nii.gz')] + '-labels.nii')
+                if hand_file.exists():
+                    seg_files.append(hand_file)
+                    continue
+                hand_file = p.parent / (p.name[:-len('.nii.gz')] + '-labels.nii.gz')
+                if hand_file.exists():
+                    seg_files.append(hand_file)
+                    continue
+                seg_files.append(p)
+
+            def categorize_seg_files(files, process_backwards=False):
+                assert all([isinstance(f, Path) for f in files])
+                annotation_type = []
+                found = False
+                files = files[::-1] if process_backwards else files
+                for s in files:
+                    if 'labels' not in s.name or 'ignore' in s.name:
+                        if not found:
+                            # Starting from the middle, if we haven't found a hand-annotated yet,
+                            # we are meant to use this automatically segmented file
+                            annotation_type.append(AUTO)
+                        else:
+                            # If we have alread found a hand-annoted closer to the center,
+                            # this region was uncertain and we don't want to supervise this region's segmentation
+                            annotation_type.append(UNCERTAIN)
+                    else:
+                        # This is a hand-annotated file
+                        found = True
+                        annotation_type.append(HAND_ANNOTATED)
+                return annotation_type[::-1] if process_backwards else annotation_type
+
+            midway_sa_idx = 3 + len(seg_files[3:]) // 2
+            seg_type_categories = [*[HAND_ANNOTATED if 'labels' in p.name else AUTO for p in seg_files[:3]],
+                                   *categorize_seg_files(seg_files[3:midway_sa_idx], process_backwards=True),
+                                   *categorize_seg_files(seg_files[midway_sa_idx:])]
+            seg_categories.append(seg_type_categories)
+            seg_files = [str(x) for x in seg_files]
+            segs.append(seg_files)
+            segs_auto.append(seg_files_auto)
             count += 1
         assert count == max_num
         print(f"Found {len(images)} subjects.")
 
-        subject_data_paths = self.preprocess_subject_data(images, segs, la_interp_segs)
+        subject_data_paths = self.preprocess_subject_data(images, segs, segs_auto, interp_segs, seg_categories)
 
         return subject_data_paths
 
-    def preprocess_subject_data(self, subj_paths, seg_paths, la_interp_seg_paths=None, debug=False):
+    def preprocess_subject_data(self, subj_paths, seg_paths, seg_paths_auto, interp_seg_paths=None, seg_type_categories=None, debug=False):
         if self.replace_existing_processed:
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
@@ -204,8 +257,7 @@ class CMRDataModule(pl.LightningDataModule):
                 # Otherwise, preprocess subject
                 images = []
                 segs = []
-                la_segs_found = []
-                la_interp_segs = []
+                gt_available_masks = []
                 affines = []
                 spacings = []
                 # Iterate backwards so that all SA segmentations are loaded by the time we tackle LA
@@ -220,68 +272,63 @@ class CMRDataModule(pl.LightningDataModule):
                     affines.append(aff)
                     spacing = torch.tensor(nib_subj.header.get_zooms()[:3], dtype=aff.dtype)
                     spacings.append(spacing)
-                    # Get segmentation for SA (when idx>=3)
-                    if idx >= 3:
+                    # Try to see if segmentations exist
+                    seg_found = True
+                    try:
                         nib_subj_seg = nib.load(subj_seg_slices[idx])
-                        seg = nib_subj_seg.get_fdata().squeeze()
-                        seg = torch.from_numpy(seg).to(torch.uint8)
+                        seg = nib_subj_seg.get_fdata().squeeze().astype(np.uint8)
+                        seg = torch.tensor(seg, dtype=torch.uint8)
                         segs.append(seg)
-                    else:
-                        # For LA try to see if segmentations exist
-                        try:
-                            nib_subj_seg = nib.load(subj_seg_slices[idx])
-                            seg = nib_subj_seg.get_fdata().squeeze().astype(np.uint8)
-                            segs.append(seg)
-                            la_segs_found.append(True)
-                        except FileNotFoundError:
-                            # For LA, if we don't have GT segmentations, we set seg as zeros.
-                            seg = torch.zeros(img.shape, dtype=torch.uint8)
-                            segs.append(seg)
-                            la_segs_found.append(False)
-                            # We try to load an interpolated segmentation from SA slices to create a training mask.
-                            try:
-                                if la_interp_seg_paths is None:
-                                    raise FileNotFoundError
-                                nib_subj_interp_seg = nib.load(la_interp_seg_paths[subj_idx][idx])
-                                interp_seg = nib_subj_interp_seg.get_fdata().squeeze().astype(np.uint8)
-                                la_interp_segs.append(interp_seg)
-                            except FileNotFoundError:
-                                # If interpolated SA seg is not found, we set it to None and will be interpolated below.
-                                la_interp_segs.append(None)
-
-                # Because we don't have LA seg, we want to label which points are far enough
-                # from foreground to confidently supervise as background
-                la_gt_available_masks = []
-                la_intensity_interp = []  # For debug visualization purposes
-                for idx, (img, aff) in enumerate(zip(images[:3], affines[:3])):
-                    if la_segs_found[idx]:
                         # If we have aGT LA segmentation, we don' need a training mask
-                        la_gt_available_masks.append(torch.ones_like(img, dtype=torch.bool))
-                        continue
-                    if la_interp_segs[idx] is None:
-                        # If we couldn't load the interpolated seg earlier,
-                        # we create it and save it so we don't repeat the slow interp process next time
-                        la_seg_interp, la_int_interp = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
-                                                                     [i.numpy() for i in images[3:]],
-                                                                     [i.numpy() for i in affines[3:]],
-                                                                     target_shape=(img.shape[0], img.shape[1], img.shape[-1]),
-                                                                     target_aff=aff.numpy(),
-                                                                     frames=None,
-                                                                     oob_dist_thresh=10.)
-                        if la_interp_seg_paths is not None:
-                            array_to_nifti(str(la_interp_seg_paths[subj_idx][idx]), la_seg_interp[:, :, None], aff.numpy())
+                    except FileNotFoundError:
+                        # If we don't have GT segmentations, we set seg as zeros.
+                        seg = torch.zeros(img.shape, dtype=torch.uint8)
+                        segs.append(seg)
+                        seg_found = False
+                    # We try to load an interpolated segmentation from SA slices to create a training mask.
+                    if seg_found and seg_type_categories[subj_idx][idx] == AUTO:
+                        gt_available_mask = torch.ones_like(img, dtype=torch.bool)
                     else:
-                        la_seg_interp = la_interp_segs[idx]
-                    la_fg = la_seg_interp > 0
-                    la_fg_dil = np.moveaxis(binary_dilation(np.moveaxis(la_fg, -1, 0), iterations=5), 0, -1)
-                    la_gt_bg = ~la_fg_dil
-                    la_gt_bg = torch.from_numpy(la_gt_bg)
-                    la_gt_available_masks.append(la_gt_bg)
+                        if idx < 3:
+                            try:
+                                # If interpolated SA seg is not found, we set it to None and will be interpolated below.
+                                nib_subj_interp_seg = nib.load(interp_seg_paths[subj_idx][idx])
+                                interp_seg = nib_subj_interp_seg.get_fdata().squeeze().astype(np.uint8)
+                            except FileNotFoundError:
+                                # If we couldn't load the interpolated seg earlier,
+                                # we create it and save it so we don't repeat the slow interp process next time
+                                segs_auto = [nib.load(subj_seg_slices[p].get_fdata().squeeze().astype(np.uint8)) for p in seg_paths_auto[3:]]
+                                interp_seg, int_interp = interpolate_sa_segs_to_la([segs_auto],
+                                                                                   [i.numpy() for i in images[3:]],
+                                                                                   [i.numpy() for i in affines[3:]],
+                                                                                   target_shape=(
+                                                                                       img.shape[0], img.shape[1],
+                                                                                       img.shape[-1]),
+                                                                                   target_aff=aff.numpy(),
+                                                                                   frames=None,
+                                                                                   oob_dist_thresh=10.)
+                                array_to_nifti(str(interp_seg_paths[subj_idx][idx]), interp_seg[:, :, None], nib_subj.affine)
+                            fg_seg = interp_seg > 0
+                            fg_dil_seg = np.moveaxis(binary_dilation(np.moveaxis(fg_seg, -1, 0), iterations=10), 0,  -1)
+                            gt_bg_seg = ~fg_dil_seg
+                            gt_bg_seg = torch.from_numpy(gt_bg_seg)
+                        else:
+                            segs_auto = [nib.load(p).get_fdata().squeeze().astype(np.uint8) for p in seg_paths_auto[subj_idx][3:]]
+                            segs_auto = torch.stack([torch.tensor(s > 0, dtype=torch.bool) for s in segs_auto], dim=0)
+                            max_mask = segs_auto.any(0)
+                            max_mask = np.moveaxis(binary_dilation(np.moveaxis(max_mask.numpy(), -1, 0), iterations=5), 0,  -1)
+                            gt_bg_seg = ~max_mask
+                            gt_bg_seg = torch.from_numpy(gt_bg_seg)
+                        gt_available_mask = gt_bg_seg
+                        if seg_type_categories[subj_idx][idx] == HAND_ANNOTATED:
+                            seg_frames = (0, 16, 32)
+                            gt_available_mask[..., seg_frames] = True
+                    gt_available_masks.append(gt_available_mask)
 
                 if self.crop_around_heart:
                     # Crop images and update affine matrices with new origins
-                    affines, segs, (images, la_gt_available_masks) = \
-                        crop_around_heart(affines, segs, [images, la_gt_available_masks])
+                    affines, segs, (images, gt_available_masks) = \
+                        crop_around_heart(affines, segs, [images, gt_available_masks])
                 # Normalize orientation of planes and store the 6 aff params
                 try:
                     affines = normalize_slice_orientation(affines, segs)
@@ -354,8 +401,8 @@ class CMRDataModule(pl.LightningDataModule):
                 seg_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
                 for i, seg in enumerate(segs):
                     seg_pad[i, :seg.shape[0], :seg.shape[1]] = seg.squeeze()
-                gt_available_pad = torch.zeros((len(la_gt_available_masks), *dim_max), dtype=torch.bool)
-                for i, a in enumerate(la_gt_available_masks):
+                gt_available_pad = torch.zeros((len(gt_available_masks), *dim_max), dtype=torch.bool)
+                for i, a in enumerate(gt_available_masks):
                     gt_available_pad[i, :a.shape[0], :a.shape[1]] = a.squeeze()
 
                 # Get max and min coordinates across subject's slices
