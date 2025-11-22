@@ -24,7 +24,7 @@ class Params:
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
-    replace_existing_preprocessed: bool = False
+    replace_existing_preprocessed: bool = True
     logging_rate: int = 2_000
     addit_log_epochs: Tuple[int, ...] = (100, 1000,)
     num_train: int = 100
@@ -74,7 +74,7 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (6,6,6,5,5)
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
     pe_anneal_max_iter: int = 0
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
@@ -118,6 +118,7 @@ def main():
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
+    quit()
     os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)

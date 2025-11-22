@@ -2,7 +2,7 @@ import time
 
 import numpy as np
 import plotly.graph_objects as go
-import pymeshlab
+# import pymeshlab
 from skimage.measure import marching_cubes
 from scipy.ndimage import binary_erosion, binary_dilation, generate_binary_structure
 import nibabel as nib
@@ -18,7 +18,7 @@ import pyvista as pv
 # im = nib.load(r"D:\logs\20251114-181651\1135402\pred\full.nii.gz")
 # pad_start = (40, 90, 40)
 # pad_end = (-30, -30, -40)
-im = nib.load(r"D:\logs\20251031-010632training_data\logs\train_volumes\1061311\pred\full.nii.gz")  # Visible papillary
+im = nib.load("/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251120-233109-long_train/logs/train_volumes/epoch_7400/1011525/pred/full.nii.gz")  # Visible papillary
 # im = nib.load(r"D:\logs\20251117-162436-foundation-cluster\logs\train_volumes\epoch_50000\1011525\full.nii.gz")  # Somewhat visible papillary
 pad_start = (40, 30, 40)
 pad_end = (-30, -30, -40)
@@ -27,7 +27,7 @@ pad_end = (-30, -30, -40)
 # pad_end = (-100, -20, -20)
 
 im = im.dataobj[...].astype(np.uint8)
-seg = nib.load(r"D:\logs\20251117-162436-foundation-cluster\logs\train_volumes\epoch_50000\1011525\full_seg.nii.gz")
+seg = nib.load(r"/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251120-233109-long_train/logs/train_volumes/epoch_7400/1011525/pred/full_seg.nii.gz")
 seg = seg.dataobj[...].copy()
 a = im[...,105, 0]
 
@@ -83,149 +83,169 @@ def get_scaled_vol(scaling):
     im_crop_scale = np.clip(im_crop[..., CURRENT_FRAME].astype(int) * scaling, 0, 255).astype(np.uint8)
     return im_crop_scale
 
-pl = pv.Plotter()
-CURRENT_FRAME = 0
-img = pv.ImageData(dimensions=(H,W,D))
-img.point_data["values"] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
-actor = pl.add_volume(img, cmap="gray", opacity=get_opacity_map(LOWER_THRESH, HIGHER_THRESH))
-actor.prop.interpolation_type = 'linear'
-
-
-def update_lower_threshold(value):
-    global LOWER_THRESH
-    LOWER_THRESH = value
-    update_opacity_map()
-
-def update_upper_threshold(value):
-    global HIGHER_THRESH
-    HIGHER_THRESH = value
-    update_opacity_map()
-
-def update_scaling(value):
-    global INTENS_SCALING
-    INTENS_SCALING = value
-    img.point_data["values"][:] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
-    update_opacity_map()
-    img.GetPointData().Modified()  # Mark the point data as modified
-    pl.render_window.Render()
-
-def update_opacity_map():
-    # Rebuild opacity transfer function
-    opacity_func = actor.GetProperty().GetScalarOpacity()
-    opacity_func.RemoveAllPoints()
-    opacity_map = get_opacity_map(LOWER_THRESH, HIGHER_THRESH, INTENS_SCALING)
-    for i, alpha in enumerate(opacity_map):
-        opacity_func.AddPoint(i, alpha)
-    pl.render_window.Render()
-update_opacity_map()
-
-slider1 = pl.add_slider_widget(
-    callback=update_lower_threshold,
-    rng=[0, 255],
-    value=LOWER_THRESH,
-    title="Lower Threshold",
-    pointa=(0.9, 0.0),
-    pointb=(0.9, 0.2),
-    style='modern'
-)
-slider2 = pl.add_slider_widget(
-    callback=update_upper_threshold,
-    rng=[0, 255],
-    value=HIGHER_THRESH,
-    title="Upper Threshold",
-    pointa=(0.9, 0.3),
-    pointb=(0.9, 0.5),
-    style='modern'
-)
-
-slider3 = pl.add_slider_widget(
-    callback=update_scaling,
-    rng=[0.0, 3.0],
-    value=INTENS_SCALING,
-    title="Intensity scaling",
-    pointa=(0.9, 0.6),
-    pointb=(0.9, 0.8),
-    style='modern'
-)
-
-
-widget = pl.add_volume_clip_plane(
-    actor,                # or img instead of actor if you prefer
-    normal=(1, -1, 0),    # plane normal → y = x
-    origin=(-11, 13, 0),     # passes through (0,0,0); adjust if needed
-    invert=False,         # flip to True if it removes the wrong side
-)
-widget.GetOutlineProperty().SetOpacity(0)
-
-
-def update(obj, event):
-    global CURRENT_FRAME
-    # print(CURRENT_FRAME)
-    CURRENT_FRAME = (CURRENT_FRAME + 1) % T
-    img.point_data["values"][:] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
-    img.GetPointData().Modified()  # Mark the point data as modified
-    pl.render_window.Render()
-
-pl.iren.initialize()
-pl.iren.add_observer('TimerEvent', update)
-loop_duration = 2.0  # seconds
-frame_time = loop_duration / T
-pl.iren.create_timer(int(frame_time * 1000))  # ms intervals, repeats indefinitely
-
-# for label, color in [
-#     (1, "darkred"),
-#     (2, "darkgreen"),
-#     (3, "darkblue")
-# ]:
-#     mask = (seg_crop == label)
-#     if not np.any(mask):
-#         continue
-#     struct = generate_binary_structure(3,3)
-#     mask = np.logical_and(mask, ~binary_erosion(mask, structure=struct, iterations=1))
-#     # if label == 2:
-#     #     mask[:-10] = 0
-#     mask[-3:] = 0
-#     mask = mask.astype(float)
+# pl = pv.Plotter()
+# CURRENT_FRAME = 0
+# img = pv.ImageData(dimensions=(H,W,D))
+# img.point_data["values"] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
+# actor = pl.add_volume(img, cmap="gray", opacity=get_opacity_map(LOWER_THRESH, HIGHER_THRESH))
+# actor.prop.interpolation_type = 'linear'
 #
-#     img_mask = pv.ImageData(dimensions=mask.shape)
-#     img_mask.point_data["m"] = mask.ravel(order="F")
 #
-#     cmap = np.tile(np.array(color), (256, 1))
-#     actor = pl.add_volume(
-#         img_mask,
-#         scalars="m",
-#         opacity=[0, 0.03],         # 0 = no mask, 1 = label
-#         cmap=[color],
-#     )
-#     actor.prop.interpolation_type = 'linear'
-    # pl.add_volume_clip_plane(actor, normal=(1, -1, 0), origin=(0, 0, 0), invert=False)
-
-pl.iren.start()
-quit()
+# def update_lower_threshold(value):
+#     global LOWER_THRESH
+#     LOWER_THRESH = value
+#     update_opacity_map()
+#
+# def update_upper_threshold(value):
+#     global HIGHER_THRESH
+#     HIGHER_THRESH = value
+#     update_opacity_map()
+#
+# def update_scaling(value):
+#     global INTENS_SCALING
+#     INTENS_SCALING = value
+#     img.point_data["values"][:] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
+#     update_opacity_map()
+#     img.GetPointData().Modified()  # Mark the point data as modified
+#     pl.render_window.Render()
+#
+# def update_opacity_map():
+#     # Rebuild opacity transfer function
+#     opacity_func = actor.GetProperty().GetScalarOpacity()
+#     opacity_func.RemoveAllPoints()
+#     opacity_map = get_opacity_map(LOWER_THRESH, HIGHER_THRESH, INTENS_SCALING)
+#     for i, alpha in enumerate(opacity_map):
+#         opacity_func.AddPoint(i, alpha)
+#     pl.render_window.Render()
+# update_opacity_map()
+#
+# slider1 = pl.add_slider_widget(
+#     callback=update_lower_threshold,
+#     rng=[0, 255],
+#     value=LOWER_THRESH,
+#     title="Lower Threshold",
+#     pointa=(0.9, 0.0),
+#     pointb=(0.9, 0.2),
+#     style='modern'
+# )
+# slider2 = pl.add_slider_widget(
+#     callback=update_upper_threshold,
+#     rng=[0, 255],
+#     value=HIGHER_THRESH,
+#     title="Upper Threshold",
+#     pointa=(0.9, 0.3),
+#     pointb=(0.9, 0.5),
+#     style='modern'
+# )
+#
+# slider3 = pl.add_slider_widget(
+#     callback=update_scaling,
+#     rng=[0.0, 3.0],
+#     value=INTENS_SCALING,
+#     title="Intensity scaling",
+#     pointa=(0.9, 0.6),
+#     pointb=(0.9, 0.8),
+#     style='modern'
+# )
+#
+#
+# widget = pl.add_volume_clip_plane(
+#     actor,                # or img instead of actor if you prefer
+#     normal=(1, -1, 0),    # plane normal → y = x
+#     origin=(-11, 13, 0),     # passes through (0,0,0); adjust if needed
+#     invert=False,         # flip to True if it removes the wrong side
+# )
+# widget.GetOutlineProperty().SetOpacity(0)
+#
+#
+# def update(obj, event):
+#     global CURRENT_FRAME
+#     # print(CURRENT_FRAME)
+#     CURRENT_FRAME = (CURRENT_FRAME + 1) % T
+#     img.point_data["values"][:] = get_scaled_vol(INTENS_SCALING).ravel(order="F")
+#     img.GetPointData().Modified()  # Mark the point data as modified
+#     pl.render_window.Render()
+#
+# pl.iren.initialize()
+# pl.iren.add_observer('TimerEvent', update)
+# loop_duration = 2.0  # seconds
+# frame_time = loop_duration / T
+# pl.iren.create_timer(int(frame_time * 1000))  # ms intervals, repeats indefinitely
+#
+# # for label, color in [
+# #     (1, "darkred"),
+# #     (2, "darkgreen"),
+# #     (3, "darkblue")
+# # ]:
+# #     mask = (seg_crop == label)
+# #     if not np.any(mask):
+# #         continue
+# #     struct = generate_binary_structure(3,3)
+# #     mask = np.logical_and(mask, ~binary_erosion(mask, structure=struct, iterations=1))
+# #     # if label == 2:
+# #     #     mask[:-10] = 0
+# #     mask[-3:] = 0
+# #     mask = mask.astype(float)
+# #
+# #     img_mask = pv.ImageData(dimensions=mask.shape)
+# #     img_mask.point_data["m"] = mask.ravel(order="F")
+# #
+# #     cmap = np.tile(np.array(color), (256, 1))
+# #     actor = pl.add_volume(
+# #         img_mask,
+# #         scalars="m",
+# #         opacity=[0, 0.03],         # 0 = no mask, 1 = label
+# #         cmap=[color],
+# #     )
+# #     actor.prop.interpolation_type = 'linear'
+#     # pl.add_volume_clip_plane(actor, normal=(1, -1, 0), origin=(0, 0, 0), invert=False)
+#
+# pl.iren.start()
+# quit()
 
 # -----------------------------------------
 # 2. Run marching cubes
 # -----------------------------------------
-t=0
-seg_masked = seg_crop[...,0]
+t=T//2
+seg_masked = seg_crop[...,t]
+seg_masked_ED = seg_crop[...,0]
 size = np.array(seg_masked.shape)
 
 # Clean up surroundings by eroding and dilating
 struct = generate_binary_structure(3, 3)
 mask = seg_masked > 0
 mask = binary_erosion(mask, structure=struct, iterations=15)
-# Dilate
 mask = binary_dilation(mask, structure=struct, iterations=18)
 seg_masked = np.where(mask, seg_masked, 0)
+mask = seg_masked_ED > 0
+mask = binary_erosion(mask, structure=struct, iterations=15)
+mask = binary_dilation(mask, structure=struct, iterations=18)
+seg_masked_ED = np.where(mask, seg_masked_ED, 0)
 
-meshes = []
+class_meshes = []
 labels = [3, 2, 1]
 for label in labels:
     if not np.any(seg_masked==label):
         continue
     verts, faces, normals, _ = marching_cubes(seg_masked == label, level=0.5)
-    verts = verts / (size - 1) * 2 - 1
-    meshes.append((verts, faces, normals))
+    verts = verts / size * 2 - 1
+    if label == 2:
+        mask = binary_dilation(seg_masked == 1, structure=struct, iterations=2)
+        verts1, faces1, normals1, _ = marching_cubes(seg_masked == label, level=0.5)
+        mesh2 = trimesh.Trimesh(verts, faces)
+        mesh1 = trimesh.Trimesh(verts1, faces1)
+        inside = mesh2.contains(mesh1.vertices)
+        # Keep faces only if *all three* vertices are outside B
+        faces_to_keep = np.all(~inside[mesh2.faces], axis=1)
+        clean_faces = mesh2.faces[faces_to_keep]
+        clean_vertices = mesh2.vertices  # unused vertices will auto-prune later
+        mesh2 = trimesh.Trimesh(
+            vertices=clean_vertices,
+            faces=clean_faces,
+            process=True  # this removes orphan vertices
+        )
+        verts, faces, normals = mesh2.vertices, mesh2.faces, mesh2.face_normals
+    class_meshes.append((verts, faces, normals))
 
 # verts are in index units, rescale back to [-1,1]
 
@@ -254,7 +274,7 @@ lighting = dict(
     fresnel=0.1
 )
 mesh_obj = []
-for label, (v, f, n) in zip(labels, meshes):
+for label, (v, f, n) in zip(labels, class_meshes):
 
     mesh = trimesh.Trimesh(vertices=v, faces=f, process=False)
     mesh = filter_taubin(mesh, lamb=0.5, nu=-0.5, iterations=5)
@@ -262,8 +282,8 @@ for label, (v, f, n) in zip(labels, meshes):
     f = np.hstack([np.full((f.shape[0], 1), 3), f]).ravel()
     mesh = pv.PolyData(v, f,)# clip the mesh
     clipped = mesh.clip(
-        normal=(1, -1, 0),     # diagonal plane normal
-        origin=(0, 0, 0),      # a point on the plane
+        normal=(0, 1, 0),     # diagonal plane normal
+        origin=(0,0,0),      # a point on the plane
         invert=False           # flip if you want the other half
     )
     v = clipped.points
@@ -289,18 +309,35 @@ for label, (v, f, n) in zip(labels, meshes):
 # -----------------------------------------
 # 4. Estimate deformations (smooth)
 # -----------------------------------------
-num_lines = 60    # N trajectories
-T = 25            # T time steps
-
+ds_factor = 1000
 # choose random mesh points
-verts, faces, normals, _ = marching_cubes(seg_masked > 0, level=0.5)
-verts = verts / (size - 1) * 2 - 1
-idx = np.random.choice(len(verts), num_lines, replace=False)
-start_points = verts[idx]
-start_normals = normals[idx]
+verts, faces, normals, _ = marching_cubes(seg_masked_ED > 0, level=0.5)
+verts = verts / size * 2 - 1
+mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+mesh = filter_taubin(mesh, lamb=0.5, nu=-0.5, iterations=5)
+v, f = mesh.vertices, mesh.faces
+f = np.hstack([np.full((f.shape[0], 1), 3), f]).ravel()
+mesh = pv.PolyData(v, f,)# clip the mesh
+clipped = mesh.clip(
+        normal=(0, 1, 0),     # diagonal plane normal
+        origin=(0,0,0),      # a point on the plane
+    invert=False           # flip if you want the other half
+)
+verts = clipped.points
+faces = clipped.faces.reshape(-1, 4)[:, 1:]  # remove leading 3
+verts = (verts + 1) / 2 * size
+
+start_points = verts[::ds_factor]
+num_lines = len(start_points)
+
+d = nib.load(r"/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251120-233109-long_train/logs/train_volumes/epoch_7400/1011525/pred/full_def.nii.gz")
+d_crop = d.dataobj[pad_start[0]:pad_end[0]:down_scale,
+            pad_start[1]:pad_end[1]:down_scale,
+            pad_start[2]:pad_end[2]:down_scale]
 
 # deformation array (N, T, 3)
-deforms = np.zeros((num_lines, T, 3))
+deform_lines = np.zeros((num_lines, T, 3))
+# deform_lines = deform_lines + start_points[:,None] / size
 
 line_obj = []
 cone_plot_rate = 10
@@ -309,26 +346,24 @@ cone_size = 0.05
 cone_obj = []
 for i in range(num_lines):
     p0 = start_points[i]
-    n = start_normals[i] / np.linalg.norm(start_normals[i])
+    p0_norm = p0 / size * 2 - 1
 
     # Fake deformation: outward along normal + small noise wiggle
     for t in range(T):
-        step = t / (T - 1)
-        outward = p0 + n * (0.15 * step)
-        jitter = 0.05 * np.sin(6 * step)
+        x, y, z = p0.round().astype(int)
+        deform_lines[i, t] = p0_norm + d_crop[x, y, z, :, t] *2  # Origin coord system is from [0,1]
 
-        deforms[i, t] = outward + jitter
     obj = go.Scatter3d(
-            x=deforms[i, :, 0],
-            y=deforms[i, :, 1],
-            z=deforms[i, :, 2],
+            x=deform_lines[i, :, 0],
+            y=deform_lines[i, :, 1],
+            z=deform_lines[i, :, 2],
             mode="lines",
             line=dict(width=4, color="rgb(0,0,150)"),
             showlegend=False
         )
     line_obj.append(obj)
-    cone_pos = deforms[i, cone_plot_offset::cone_plot_rate]
-    cone_direction = cone_pos - deforms[i, cone_plot_offset-1:-1:cone_plot_rate]
+    cone_pos = deform_lines[i, cone_plot_offset::cone_plot_rate]
+    cone_direction = cone_pos - deform_lines[i, cone_plot_offset - 1:-1:cone_plot_rate]
     cone_direction_n = cone_direction / np.linalg.norm(cone_direction, axis=-1)[:, None]
     cone = go.Cone(
         x=cone_pos[:, 0],
@@ -339,7 +374,7 @@ for i in range(num_lines):
         w=cone_direction_n[:, 2],
         colorscale=[[0, "pink"], [1, "pink"]],
         showscale=False,
-        sizemode="raw",
+        sizemode="absolute",
         sizeref=cone_size,  # size of arrowhead
         anchor="tail"  # tail is at (x,y,z)
     )
@@ -355,8 +390,8 @@ for obj in mesh_obj:
 for line in line_obj:
     fig.add_trace(line)
 
-for c in cone_obj:
-    fig.add_trace(c)
+# for c in cone_obj:
+#     fig.add_trace(c)
 
 fig.update_layout(
     scene=dict(

@@ -148,7 +148,14 @@ class CMRDataModule(pl.LightningDataModule):
         segs_auto = []
         interp_segs = []
         seg_categories = []
+        annotated_subj_ids = [1009169, 1011525, 1012959, 1021869, 1026284, 1037010, 1037287, 1037527, 1043831, 1050481,
+                           1053004, 1059837, 1060134, 1060474,1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
+        annotated_subj_ids = [str(i) for i in annotated_subj_ids]
+        annotated_subjs = list(sorted([str(Path(self.load_la_dir) / i) for i in annotated_subj_ids]))
+        assert all([Path(i).exists() for i in annotated_subjs])
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
+        subjects = annotated_subjs + [i for i in subjects if Path(i).name not in annotated_subj_ids]
+        subjects = list(sorted(subjects))
         for i, parent in enumerate(subjects):
             if parent in {"1013493", "1439318"}:
                 continue
@@ -238,7 +245,7 @@ class CMRDataModule(pl.LightningDataModule):
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
         prepr_data_paths = []
-        for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths))), desc="Preprocessing subject data into torch tensor."):
+        for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths)))[::-1], desc="Preprocessing subject data into torch tensor."):
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / "prep_data.h5"
