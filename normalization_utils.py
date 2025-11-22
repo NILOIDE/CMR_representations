@@ -259,7 +259,7 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
                                                              lv_myo_sample_points_norm[None,None].flip(-1),
                                                              mode='nearest', align_corners=True).to(torch.uint8).squeeze()
         if not (lv_sample_segs==3).any():
-            raise ValueError, f"Slice {lv_midventr_slice}, {lv_sample_segs}"
+            raise ValueError( f"Slice {lv_midventr_slice}, {lv_sample_segs}")
         rv_center = torch.where(lv_sample_segs==3)[0].median()
         if rv_center >= myo_search_num_samples//2:
             rv_to_lv_samples = lv_sample_segs[myo_search_num_samples//2:]
