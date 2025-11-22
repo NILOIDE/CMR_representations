@@ -527,7 +527,7 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         # for i in range(0, min(len(dset), 8)):
-        for i in range(0, 8):
+        for i in range(0, 4):
             batch = tuple(b[None].cuda() for b in dset[i])
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
             self.log_images(i, dset, mode=dset_str,

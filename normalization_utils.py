@@ -243,7 +243,7 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
     lv_rv_vector_points_image_aug = (torch.linalg.inv(affines[lv_midventr_slice]) @ lv_rv_vector_points_aug.T).T
     assert lv_rv_vector_points_image_aug[:,2].abs().sum() < 1e-4,  "z coord in image coords should be near 0.0"
     assert (lv_rv_vector_points_image_aug[:,3] - 1.).abs().sum() < 1e-5,  "Aug corner should be near 1.0"
-    # In order to find the heart center, we sample segmentatin along the 4ch intersection line on the SA mid-ventr slice
+    # In order to find the heart center, we sample segmentation along the 4ch intersection line on the SA mid-ventr slice
     # Then find which direction leads towards the RV, and find the center of the MYO seg class between LV and RV blobs
     lv_rv_vector_points_image = lv_rv_vector_points_image_aug[:, :2]
     lv_rv_vector_image = lv_rv_vector_points_image[1] - lv_rv_vector_points_image[0]

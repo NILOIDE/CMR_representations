@@ -26,7 +26,7 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 2_000
-    addit_log_epochs: Tuple[int, ...] = (100,500, 1000,)
+    addit_log_epochs: Tuple[int, ...] = (500, )
     num_train: int = 100
     num_val: int = 10
     num_test: int = 1
@@ -84,7 +84,7 @@ class Params:
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
     # resume_checkpoint_path: str = ""
-    resume_checkpoint_path: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models/20251117-162436-foundation/checkpoints/epoch-epoch=039999.ckpt"
+    resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=059999.ckpt"
     inference: bool = False
 
 def main():
