@@ -24,7 +24,7 @@ class Params:
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
-    replace_existing_preprocessed: bool = True
+    replace_existing_preprocessed: bool = False
     logging_rate: int = 10_000
     addit_log_epochs: Tuple[int, ...] = (100, 1000,)
     num_train: int = 20
@@ -118,7 +118,6 @@ def main():
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
-    quit()
     os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
