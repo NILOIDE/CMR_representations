@@ -245,7 +245,7 @@ class CMRDataModule(pl.LightningDataModule):
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
         prepr_data_paths = []
-        for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths)))[::-1], desc="Preprocessing subject data into torch tensor."):
+        for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths))), desc="Preprocessing subject data into torch tensor."):
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / "prep_data.h5"
