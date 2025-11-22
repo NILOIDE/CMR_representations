@@ -283,7 +283,11 @@ class CMRDataModule(pl.LightningDataModule):
                     affines, segs, (images, la_gt_available_masks) = \
                         crop_around_heart(affines, segs, [images, la_gt_available_masks])
                 # Normalize orientation of planes and store the 6 aff params
-                affines = normalize_slice_orientation(affines, segs)
+                try:
+                    affines = normalize_slice_orientation(affines, segs)
+                except ValueError as e:
+                    print(subject_id)
+                    raise e
 
                 flippings = []
                 aff_params = []
