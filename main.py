@@ -25,9 +25,10 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
+    replace_existing_preprocessed: bool = True
     logging_rate: int = 10_000
     addit_log_epochs: Tuple[int, ...] = (100, 1000,)
-    num_train: int = 20
+    num_train: int = 100
     num_val: int = 1
     num_test: int = 1
     num_workers: int = 8

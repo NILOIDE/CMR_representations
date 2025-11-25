@@ -213,7 +213,7 @@ class CMRDataModule(pl.LightningDataModule):
                             # we are meant to use this automatically segmented file
                             annotation_type.append(AUTO)
                         else:
-                            # If we have alread found a hand-annoted closer to the center,
+                            # If we have already found a hand-annotated closer to the center,
                             # this region was uncertain and we don't want to supervise this region's segmentation
                             annotation_type.append(UNCERTAIN)
                     else:
@@ -224,8 +224,9 @@ class CMRDataModule(pl.LightningDataModule):
 
             midway_sa_idx = 3 + len(seg_files[3:]) // 2
             seg_type_categories = [*[HAND_ANNOTATED if 'labels' in p.name else AUTO for p in seg_files[:3]],
-                                   *categorize_seg_files(seg_files[3:midway_sa_idx], process_backwards=True),
-                                   *categorize_seg_files(seg_files[midway_sa_idx:])]
+                                   *[AUTO]*len(seg_files[3:])]
+                                   # *categorize_seg_files(seg_files[3:midway_sa_idx], process_backwards=True),
+                                   # *categorize_seg_files(seg_files[midway_sa_idx:])]
             seg_categories.append(seg_type_categories)
             seg_files = [str(x) for x in seg_files]
             segs.append(seg_files)
@@ -279,7 +280,7 @@ class CMRDataModule(pl.LightningDataModule):
                         seg = nib_subj_seg.get_fdata().squeeze().astype(np.uint8)
                         seg = torch.tensor(seg, dtype=torch.uint8)
                         segs.append(seg)
-                        # If we have aGT LA segmentation, we don' need a training mask
+                        # If we have a GT LA segmentation, we don't need a training mask
                     except FileNotFoundError:
                         # If we don't have GT segmentations, we set seg as zeros.
                         seg = torch.zeros(img.shape, dtype=torch.uint8)
