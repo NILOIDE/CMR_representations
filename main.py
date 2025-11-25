@@ -25,9 +25,9 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = True
-    logging_rate: int = 2_000
+    logging_rate: int = 5_000
     logging_start_rate: int = 20_000
-    addit_log_epochs: Tuple[int, ...] = (1000, 10_000)
+    addit_log_epochs: Tuple[int, ...] = ()
     num_train: int = 100
     num_val: int = 1
     num_test: int = 1
@@ -82,7 +82,7 @@ class Params:
     # Paths
     job_name: str = ''
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
-    preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
+    preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop_la"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
     resume_checkpoint_path: str = ""
     # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=029999.ckpt"

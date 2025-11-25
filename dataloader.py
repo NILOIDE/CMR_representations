@@ -191,6 +191,8 @@ class CMRDataModule(pl.LightningDataModule):
             # If hand-annotated files exist, pick them over auto-segmented ones.
             seg_files = []
             for i, p in enumerate(seg_files_auto):
+                if i >= 3:
+                    seg_files.append(p)
                 hand_file = p.parent / (p.name[:-len('.nii.gz')] + '-labels.nii')
                 if hand_file.exists():
                     seg_files.append(hand_file)
@@ -201,28 +203,28 @@ class CMRDataModule(pl.LightningDataModule):
                     continue
                 seg_files.append(p)
 
-            def categorize_seg_files(files, process_backwards=False):
-                assert all([isinstance(f, Path) for f in files])
-                annotation_type = []
-                found = False
-                files = files[::-1] if process_backwards else files
-                for s in files:
-                    if 'labels' not in s.name or 'ignore' in s.name:
-                        if not found:
-                            # Starting from the middle, if we haven't found a hand-annotated yet,
-                            # we are meant to use this automatically segmented file
-                            annotation_type.append(AUTO)
-                        else:
-                            # If we have already found a hand-annotated closer to the center,
-                            # this region was uncertain and we don't want to supervise this region's segmentation
-                            annotation_type.append(UNCERTAIN)
-                    else:
-                        # This is a hand-annotated file
-                        found = True
-                        annotation_type.append(HAND_ANNOTATED)
-                return annotation_type[::-1] if process_backwards else annotation_type
-
-            midway_sa_idx = 3 + len(seg_files[3:]) // 2
+            # def categorize_seg_files(files, process_backwards=False):
+            #     assert all([isinstance(f, Path) for f in files])
+            #     annotation_type = []
+            #     found = False
+            #     files = files[::-1] if process_backwards else files
+            #     for s in files:
+            #         if 'labels' not in s.name or 'ignore' in s.name:
+            #             if not found:
+            #                 # Starting from the middle, if we haven't found a hand-annotated yet,
+            #                 # we are meant to use this automatically segmented file
+            #                 annotation_type.append(AUTO)
+            #             else:
+            #                 # If we have already found a hand-annotated closer to the center,
+            #                 # this region was uncertain and we don't want to supervise this region's segmentation
+            #                 annotation_type.append(UNCERTAIN)
+            #         else:
+            #             # This is a hand-annotated file
+            #             found = True
+            #             annotation_type.append(HAND_ANNOTATED)
+            #     return annotation_type[::-1] if process_backwards else annotation_type
+            #
+            # midway_sa_idx = 3 + len(seg_files[3:]) // 2
             seg_type_categories = [*[HAND_ANNOTATED if 'labels' in p.name else AUTO for p in seg_files[:3]],
                                    *[AUTO]*len(seg_files[3:])]
                                    # *categorize_seg_files(seg_files[3:midway_sa_idx], process_backwards=True),
