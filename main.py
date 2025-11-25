@@ -62,8 +62,8 @@ class Params:
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
-    weight_loss_regist_jac_reg: float = 1e-3
-    weight_loss_regist_mag_reg: float = 1e0
+    weight_loss_regist_jac_reg: float = 1e-2
+    weight_loss_regist_mag_reg: float = 1e-1
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
