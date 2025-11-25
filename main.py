@@ -76,7 +76,7 @@ class Params:
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
-    pe_anneal_max_iter: int = 0
+    pe_anneal_max_iter: int = 100_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
