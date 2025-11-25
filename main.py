@@ -24,10 +24,10 @@ class Params:
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
-    replace_existing_preprocessed: bool = False
     replace_existing_preprocessed: bool = True
-    logging_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (100, 1000,)
+    logging_rate: int = 5_000
+    logging_start_rate: int = 20_000
+    addit_log_epochs: Tuple[int, ...] = (1000, 10_000)
     num_train: int = 100
     num_val: int = 1
     num_test: int = 1
@@ -38,7 +38,7 @@ class Params:
     point_spread_start_epoch: int = 20_000
     point_spread_size: int = 16
     num_coords_during_point_spread: int = 35000
-    point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
+    point_spread_std_before: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
@@ -80,7 +80,7 @@ class Params:
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
-    job_name: str = 'long_train'
+    job_name: str = ''
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
