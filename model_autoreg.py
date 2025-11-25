@@ -36,6 +36,7 @@ class INR_AutoReg(pl.LightningModule):
         self.logging_disabled = kwargs['logging_disabled']
         self.logging_wandb_disabled = kwargs['logging_wandb_disabled']
         self.logging_rate = kwargs['logging_rate']
+        self.logging_start_rate = kwargs['logging_start_rate']
         self.addit_log_epochs = kwargs['addit_log_epochs']
         self.inference_metrics = {}
         self.log_path = log_path
@@ -513,7 +514,8 @@ class INR_AutoReg(pl.LightningModule):
 
     def on_train_epoch_start(self):
         self.target_net.load_state_dict(self.canonical_inr.state_dict())
-        if (self.current_epoch % self.logging_rate == 0 and self.current_epoch > 0) or self.current_epoch in self.addit_log_epochs:
+        if (self.current_epoch > 0 and self.current_epoch >= self.logging_start_rate and self.current_epoch % self.logging_rate == 0
+                or self.current_epoch in self.addit_log_epochs):
             self.do_logging()
 
     def do_logging(self):
