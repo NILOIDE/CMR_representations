@@ -25,7 +25,7 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = True
-    logging_rate: int = 5_000
+    logging_rate: int = 2_000
     logging_start_rate: int = 20_000
     addit_log_epochs: Tuple[int, ...] = (1000, 10_000)
     num_train: int = 100
