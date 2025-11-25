@@ -26,9 +26,10 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 2_000
-    addit_log_epochs: Tuple[int, ...] = (500, )
-    num_train: int = 100
-    num_val: int = 10
+    logging_start_rate: int = 0
+    addit_log_epochs: Tuple[int, ...] = (100, 1000)
+    num_train: int = 20
+    num_val: int = 1
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
@@ -61,8 +62,8 @@ class Params:
     regist_weights_std: float = 1e-3
     weight_loss_regist_recon: float = 1e-1
     weight_loss_regist_seg: float = 1e-1
-    weight_loss_regist_jac_reg: float = 1e-1
-    weight_loss_regist_mag_reg: float = 1e-1
+    weight_loss_regist_jac_reg: float = 1e-3
+    weight_loss_regist_mag_reg: float = 1e0
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
@@ -74,17 +75,17 @@ class Params:
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (6,6,6,5,5)
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
     pe_anneal_max_iter: int = 0
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
-    job_name: str = 'long_train'
+    job_name: str = 'regist'
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
     # resume_checkpoint_path: str = ""
-    resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=059999.ckpt"
+    resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251123-010747-psf40k/checkpoints/epoch-epoch=050999.ckpt"
     inference: bool = False
 
 def main():
