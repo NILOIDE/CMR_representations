@@ -24,7 +24,7 @@ class Params:
     max_epochs: int = 1_000_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
-    replace_existing_preprocessed: bool = True
+    replace_existing_preprocessed: bool = False
     logging_rate: int = 5_000
     logging_start_rate: int = 20_000
     addit_log_epochs: Tuple[int, ...] = ()
