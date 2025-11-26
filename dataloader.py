@@ -193,6 +193,7 @@ class CMRDataModule(pl.LightningDataModule):
             for i, p in enumerate(seg_files_auto):
                 if i >= 3:
                     seg_files.append(p)
+                    continue
                 hand_file = p.parent / (p.name[:-len('.nii.gz')] + '-labels.nii')
                 if hand_file.exists():
                     seg_files.append(hand_file)
