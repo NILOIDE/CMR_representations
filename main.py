@@ -36,7 +36,8 @@ class Params:
     num_coords: int = 70_000
     # Point spread function ------------------------------------------------------------
     point_spread_start_epoch: int = 20_000
-    point_spread_size: int = 16
+    point_spread_size_before: int = 1
+    point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 35000
     point_spread_std_before: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)

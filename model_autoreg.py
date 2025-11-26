@@ -49,7 +49,8 @@ class INR_AutoReg(pl.LightningModule):
         self.norm_min, self.norm_max = 0.0, 1.0
         self.point_spread_start_epoch = kwargs['point_spread_start_epoch']
         self.num_coords_during_point_spread = kwargs['num_coords_during_point_spread']
-        self.point_spread_size = kwargs['point_spread_size']
+        self.point_spread_size_after = kwargs['point_spread_size_after']
+        self.point_spread_size_before = kwargs['point_spread_size_before']
         self.point_spread_std_before = torch.tensor(kwargs['point_spread_std_before'], dtype=torch.float32, device="cuda"
                                              ).reshape(1, 1, 1, self.coord_size)
         self.point_spread_std_after = torch.tensor(kwargs['point_spread_std_after'], dtype=torch.float32, device="cuda"
@@ -442,7 +443,7 @@ class INR_AutoReg(pl.LightningModule):
             slice_idx,
             min_coords, max_coords,
             latent_params, aff_def_params,
-            1 if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size,
+            self.point_spread_size_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size_after,
             self.point_spread_std_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_std_after,
             return_deriv=self.supervise_deriv,
             return_def=False)
@@ -620,7 +621,7 @@ class INR_AutoReg(pl.LightningModule):
                                                                    min_coords, max_coords,
                                                                    latent_params=inf_subj_latents[subject_idx],
                                                                    aff_def_params=inf_aff_def_params[subject_idx],
-                                                                   point_spread_size=self.point_spread_size,
+                                                                   point_spread_size=self.point_spread_size_after,
                                                                    point_spread_std=self.point_spread_std,
                                                                    return_deriv=self.supervise_deriv)
             values_deform = self.apply_intensity_scaling(img_values, coords_voxel, slice_idx, intens_scale_params)
