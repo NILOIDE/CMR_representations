@@ -26,8 +26,9 @@ class Params:
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 2_000
+    logging_rate: int = 5_000
     logging_start_rate: int = 0
-    addit_log_epochs: Tuple[int, ...] = (100, 1000)
+    addit_log_epochs: Tuple[int, ...] = (1000,)
     num_train: int = 20
     num_val: int = 1
     num_test: int = 1
@@ -60,8 +61,8 @@ class Params:
     # Registration ---------------------------------------------------------------
     regist_task_start_epoch: int = 0
     regist_weights_std: float = 1e-3
-    weight_loss_regist_recon: float = 1e-1
-    weight_loss_regist_seg: float = 1e-1
+    weight_loss_regist_recon: float = 1e0
+    weight_loss_regist_seg: float = 0e-1
     weight_loss_regist_jac_reg: float = 1e-2
     weight_loss_regist_mag_reg: float = 1e-1
     # Learning rates -------------------------------------------------------------------
