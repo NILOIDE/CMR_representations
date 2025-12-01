@@ -23,8 +23,8 @@ class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    logging_disabled: bool = True
-    logging_wandb_disabled: bool = True
+    logging_disabled: bool = False
+    logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 5_000
     logging_start_rate: int = 20_000
@@ -80,8 +80,8 @@ class Params:
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop_la"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
-    # resume_checkpoint_path: str = ""
-    resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
+    resume_checkpoint_path: str = ""
+    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
     # Inference ----------
     inference: bool = True
     inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
