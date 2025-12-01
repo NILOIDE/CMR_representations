@@ -506,7 +506,7 @@ def video_array_to_file(array: Union[np.ndarray, torch.Tensor],
 
 
 def data_frame_to_line_plot(df, x, metric_name, subj_idx, save_path):
-    assert df.shape[0] == len(x)
+    assert df.shape[0] == len(x), f"Metric: {metric_name} appears to have a dataframe issue"
     plt.figure(figsize=(10, 6))
     # Plot each column
     for column in df.columns:

@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List
@@ -22,15 +23,15 @@ class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    logging_disabled: bool = False
-    logging_wandb_disabled: bool = False
+    logging_disabled: bool = True
+    logging_wandb_disabled: bool = True
     replace_existing_preprocessed: bool = False
     logging_rate: int = 5_000
     logging_start_rate: int = 20_000
     addit_log_epochs: Tuple[int, ...] = ()
     num_train: int = 100
-    num_val: int = 1
-    num_test: int = 1
+    num_val: int = 0
+    num_test: int = 6
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 70_000
@@ -39,7 +40,7 @@ class Params:
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 35000
-    point_spread_std_before: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)#(0.3, 0.3, 0.3, 0.3)
+    point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
@@ -52,7 +53,7 @@ class Params:
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_aff: float = 1e-4
-    weight_reg_lat: float = 1e-4
+    weight_reg_lat: float = 1e-1
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
@@ -69,12 +70,6 @@ class Params:
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
-    # Inference ----------
-    inf_max_epochs: int = 1500
-    inf_num_coords: int = 75_000
-    inf_learning_rate: float = 1e-3
-    inf_learning_rate_aff: float = 1e-3
-    inf_learning_rate_def: float = 1e-3
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
     pe_anneal_max_iter: int = 100_000
@@ -85,9 +80,18 @@ class Params:
     data_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_subjects"
     preprocessed_h5_dir: str = r"/vol/miltank/projects/ukbb/data/cardiac/slice_alignment/unaligned_h5_crop_la"
     trained_models_dir: str = "/u/home/stol/Documents/Projects/CMR_intensity_alignment/trained_models"
-    resume_checkpoint_path: str = ""
-    # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251117-162436-foundation-cluster/checkpoints/epoch-epoch=029999.ckpt"
-    inference: bool = False
+    # resume_checkpoint_path: str = ""
+    resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
+    # Inference ----------
+    inference: bool = True
+    inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
+    inf_max_epochs: int = 2500
+    inf_num_coords: int = 35_000
+    inf_learning_rate: float = 1e-3
+    inf_learning_rate_aff: float = 1e-3
+    inf_learning_rate_def: float = 1e-3
+    inf_point_spread_start_epoch: int = 9999
+
 
 def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -142,23 +146,37 @@ def main():
         model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
                             max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
                             log_path=log_path, **params.__dict__)
-    trainer = Trainer(
-        logger=logger,
-        callbacks=[checkpoint_callback],
-        accelerator='gpu',
-        devices=1,
-        max_epochs=params.point_spread_start_epoch,
-        fast_dev_run=False,
-        limit_train_batches=1.0,
-        limit_val_batches=1.0,
-        num_sanity_val_steps=1,
-    )
-    ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
-    trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
-    # Then continue with updated datasets ready for point-spread
-    trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
-    trainer.fit_loop.max_epochs = params.max_epochs
-    trainer.fit(model, datamodule=data_module)
-    # First train up until point-spread start epochs
+    if not params.inference:
+        trainer = Trainer(
+            logger=logger,
+            callbacks=[checkpoint_callback],
+            accelerator='gpu',
+            devices=1,
+            max_epochs=params.point_spread_start_epoch,
+            fast_dev_run=False,
+            limit_train_batches=1.0,
+            limit_val_batches=1.0,
+            num_sanity_val_steps=1,
+        )
+        ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
+        trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
+        # Then continue with updated datasets ready for point-spread
+        trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
+        trainer.fit_loop.max_epochs = params.max_epochs
+        trainer.fit(model, datamodule=data_module)
+        # First train up until point-spread start epochs
+    else:
+        ckpt = torch.load(params.inference_path)
+        model.load_state_dict(ckpt['state_dict'])
+        # prefix = "canonical_inr."
+        # # Filter + rename keys
+        # filtered = {k[len(prefix):]: v for k, v in ckpt['state_dict'].items() if k.startswith(prefix)}
+        # model.canonical_inr.load_state_dict(filtered, strict=True)
+        model.canonical_inr = model.canonical_inr.to('cuda')
+        model.target_net = deepcopy(model.canonical_inr)
+        model.regist_inr = model.regist_inr.to('cuda')
+        model.do_testing(data_module.test_dset, )
+
+
 if __name__ == '__main__':
     main()

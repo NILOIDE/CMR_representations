@@ -101,7 +101,7 @@ class PosEncodingNeRFAnnealed(PosEncodingNeRFOptimized):
         d = "xyzt"
         return f"NeRF Annealed ({d[:self.in_dim]}   Freqs: {self.num_frequencies}, Scales: {self.freq_scale}, Out-dim: {self.out_dim}, Max-iters: {self.max_iter})"
 
-    def get_freq_mask_alpha(self, current_iter):
+    def get_freq_mask_alpha(self, current_iter=None):
         # based on https://github.com/Jiawei-Yang/FreeNeRF/blob/main/internal/math.py#L277
         if current_iter is not None:
             if self.print_thresholds:

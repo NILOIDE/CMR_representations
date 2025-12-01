@@ -11,7 +11,6 @@ from utils import make_masked_coordinate_tensor, to_1hot, make_coordinate_tensor
 class CardiacUKBB(Dataset):
     def __init__(self, subject_data_paths, max_slices, max_slice_shape, num_coords=4000, **kwargs):
         super().__init__()
-        assert subject_data_paths
         self.data_paths = subject_data_paths
         self.num_coords = num_coords
         self.max_slices = max_slices

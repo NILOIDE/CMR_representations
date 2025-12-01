@@ -22,7 +22,7 @@ from utils import normalize_image_with_percentile, mat_to_params, \
     compute_3d_image_gradients, to_gif, nlm_denoise_multi_parallel
 
 UNCERTAIN, AUTO, HAND_ANNOTATED = 'uncertain', 'auto', 'hand_annotated'
-
+PREPR_FILE_NAME = "prep_data.h5"
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -142,7 +142,15 @@ class CMRDataModule(pl.LightningDataModule):
         return self._test_dataloader
 
     def find_subjects(self, max_num=100, **kwargs):
+        # Try to see if we have enough preprocessed files
+        if not self.replace_existing_processed:
+            subj_h5s = list(Path(self.store_path).iterdir())
+            subject_data_paths = sorted(subj_h5s, key=lambda x: x.name)
+            subject_data_paths = [str(i / PREPR_FILE_NAME) for i in subject_data_paths]
+            if len(subject_data_paths) >= max_num:
+                return subject_data_paths[:max_num]
 
+        # Look for subjects to preprocess
         images = []
         segs = []
         segs_auto = []
@@ -252,7 +260,7 @@ class CMRDataModule(pl.LightningDataModule):
         for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths))), desc="Preprocessing subject data into torch tensor."):
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
-            save_path = store_path / subject_id / "prep_data.h5"
+            save_path = store_path / subject_id / PREPR_FILE_NAME
             if save_path.exists() and not self.replace_existing_processed:
                 prepr_data_paths.append(str(save_path))
                 continue

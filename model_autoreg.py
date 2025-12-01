@@ -32,7 +32,7 @@ from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplo
 class INR_AutoReg(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
         super(INR_AutoReg, self).__init__()
-        self.automatic_optimization = False
+        self.automatic_optimization = False  # Lightning param
         self.logging_disabled = kwargs['logging_disabled']
         self.logging_wandb_disabled = kwargs['logging_wandb_disabled']
         self.logging_rate = kwargs['logging_rate']
@@ -106,21 +106,23 @@ class INR_AutoReg(pl.LightningModule):
         self.weight_loss_regist_jac_reg = kwargs['weight_loss_regist_jac_reg']
         self.weight_loss_regist_mag_reg = kwargs['weight_loss_regist_mag_reg']
         self.supervise_regist = self.weight_loss_regist_seg != 0 or self.weight_loss_regist_recon != 0
-        # Target network prediction caches for ~10% speedup
         self.lr = kwargs["learning_rate"]
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
+        # Inference hyperparams
+        self.inf_max_epochs = kwargs["inf_max_epochs"]
+        self.inf_num_coords = kwargs["inf_num_coords"]
         self.inf_lr = kwargs["inf_learning_rate"]
         self.inf_lr_aff = kwargs["inf_learning_rate_aff"]
         self.inf_lr_def = kwargs["inf_learning_rate_def"]
-        self.inf_max_epochs = kwargs["inf_max_epochs"]
+        self.inf_point_spread_start_epoch = kwargs['inf_point_spread_start_epoch']
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters(), self.subj_latents], lr=self.lr)
-        opt_aff = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
-        opt_intensity = torch.optim.Adam([self.intensity_scale_params], lr=self.lr_def)
-        opt_regist = torch.optim.Adam([*self.regist_inr.parameters(), self.reg_subj_latents], lr=self.lr)
-        return opt_inr, opt_aff, opt_intensity, opt_regist
+        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.lr)
+        opt_latent = torch.optim.Adam([ self.subj_latents], lr=self.lr_def)
+        opt_params = torch.optim.Adam([self.intensity_scale_params, self.aff_deform_params], lr=self.lr_def)
+        opt_regist = torch.optim.Adam([*self.regist_inr.parameters()], lr=self.lr)
+        return opt_inr, opt_latent, opt_params, opt_regist
 
     @staticmethod
     def loss_reg_inr_params(params, weight: float, dict_name='loss_reg_inr'):
@@ -231,10 +233,10 @@ class INR_AutoReg(pl.LightningModule):
                 aff_def_params: Optional[torch.Tensor] = None,
                 return_deriv: bool = False,
                 return_def: bool = True,
-                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+                **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                 slice_idx, min_coords, max_coords, aff_def_params)
-        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params, return_def=return_def)
+        values_pred, seg_pred, regist_pred = self.forward_inr(world_coords, latent_params, return_def=return_def, **kwargs)
         values_pred_d = None
         if return_deriv:
             values_pred_d = torch.autograd.grad(values_pred, world_coords, grad_outputs=torch.ones_like(values_pred),
@@ -293,9 +295,10 @@ class INR_AutoReg(pl.LightningModule):
     def forward_inr(self,
                     coords: torch.Tensor,
                     subject_latent: torch.Tensor,
-                    return_def: bool = True) \
+                    return_def: bool = True,
+                    **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        net_input = self.process_input(coords, subject_latent)
+        net_input = self.process_input(coords, subject_latent, **kwargs)
         values_pred, seg_pred = self.forward_view_inr(net_input=net_input)
         def_pred = None
         if return_def:
@@ -303,13 +306,15 @@ class INR_AutoReg(pl.LightningModule):
         return values_pred, seg_pred, def_pred
 
     def process_input(self,
-                    coords: torch.Tensor,
-                    subject_latent: torch.Tensor) -> torch.Tensor:
+                      coords: torch.Tensor,
+                      subject_latent: torch.Tensor,
+                      inference=True,
+                      **kwargs) -> torch.Tensor:
         # Make time dim cyclical
         coords = torch.cat((coords[..., :3],
                             torch.cos(coords[...,-1:] * torch.pi),
                             torch.sin(coords[...,-1:] * torch.pi)), dim=-1)
-        coords_enc = self.pos_enc(coords, self.global_step)
+        coords_enc = self.pos_enc(coords, None if inference else self.global_step)
         subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
         x = torch.cat((coords_enc, subject_latent), dim=-1)
         return x
@@ -318,10 +323,11 @@ class INR_AutoReg(pl.LightningModule):
                          coords: Optional[torch.Tensor] = None,
                          subject_latent: Optional[torch.Tensor] = None,
                          net_input: Optional[torch.Tensor] = None,
-                         use_target_net: bool = False) \
+                         use_target_net: bool = False,
+                         **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
         if net_input is None:
-            net_input = self.process_input(coords, subject_latent)
+            net_input = self.process_input(coords, subject_latent, **kwargs)
         # Forward INR to obtain predicted volume values
         B, N, F = net_input.shape
         x_ = net_input.reshape((-1, F))
@@ -338,10 +344,11 @@ class INR_AutoReg(pl.LightningModule):
     def forward_def_inr(self,
                         coords: Optional[torch.Tensor] = None,
                         subject_latent: Optional[torch.Tensor] = None,
-                        net_input: Optional[torch.Tensor] = None) \
+                        net_input: Optional[torch.Tensor] = None,
+                        **kwargs) \
                 -> torch.Tensor:
         if net_input is None:
-            net_input = self.process_input(coords, subject_latent)
+            net_input = self.process_input(coords, subject_latent, **kwargs)
         B, N, F = net_input.shape
         # Forward INR to obtain predicted volume values
         x_ = net_input.reshape((-1, F))
@@ -385,6 +392,7 @@ class INR_AutoReg(pl.LightningModule):
                                   point_spread_std: torch.Tensor,
                                   return_deriv: bool = False,
                                   return_def: bool = True,
+                                  **kwargs,
                                   ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         B, N, C = coords_voxel.shape
         coords_voxel_tile = coords_voxel[..., None, :].tile(1, 1, point_spread_size, 1)
@@ -402,7 +410,8 @@ class INR_AutoReg(pl.LightningModule):
                            latent_params=latent_params,
                            aff_def_params=aff_def_params,
                            return_deriv=return_deriv,
-                           return_def=return_def)
+                           return_def=return_def,
+                           **kwargs)
         values_pred = values_pred_.reshape(B, N, point_spread_size).mean(2)
         seg_pred = seg_pred_.reshape(B, N, point_spread_size, -1).mean(2)
         regist_pred = None
@@ -426,10 +435,10 @@ class INR_AutoReg(pl.LightningModule):
         return latent_params, aff_def_params, intens_scale_params
 
     def training_step(self, batch):
-        opt_inr, opt_deform, opt_inten, opt_regist = self.optimizers()
+        opt_inr, opt_latent, opt_params, opt_regist = self.optimizers()
         opt_inr.zero_grad()
-        opt_deform.zero_grad()
-        opt_inten.zero_grad()
+        opt_params.zero_grad()
+        opt_latent.zero_grad()
 
         # Get batch elements
         (coords_voxel, values, values_dt, segs, gt_avail,
@@ -469,8 +478,6 @@ class INR_AutoReg(pl.LightningModule):
         loss = loss_recon + loss_regul + loss_seg + loss_dt
         self.manual_backward(loss)
         opt_inr.step()
-        opt_inten.step()
-        opt_deform.step()
 
         # Supervise deformations
         loss_regist, loss_regist_recon, loss_regist_seg, loss_regist_jac_reg, loss_regist_mag_reg, loss_regist_weight_reg \
@@ -478,7 +485,6 @@ class INR_AutoReg(pl.LightningModule):
         if self.supervise_regist and self.current_epoch >= self.regist_task_start_epoch:
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
             opt_regist.zero_grad()
-            opt_deform.zero_grad()
             world_coords = self.forward_coord_model(coords_voxel, aff_params, spacings, needs_flip,
                                                     slice_idx, min_coords, max_coords, aff_def_params)
             # Registration metrics_and loss
@@ -487,7 +493,9 @@ class INR_AutoReg(pl.LightningModule):
             loss_regist = loss_regist_recon + loss_regist_seg + loss_regist_jac_reg + loss_regist_mag_reg + loss_regist_weight_reg
             self.manual_backward(loss_regist)
             opt_regist.step()
-            opt_deform.step()
+
+        opt_params.step()
+        opt_latent.step()
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
@@ -533,25 +541,49 @@ class INR_AutoReg(pl.LightningModule):
             self.log_volume(i, dset, mode=dset_str,
                             latent_params=latent_params,
                             aff_def_params=aff_def_params)
-    #     dset_str = 'val'
-    #     dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-    #     for i in range(0, len(dset)):
-    #         latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-    #         optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
-    #             = self.inference(i, dset,
-    #                              latent_params=latent_params,
-    #                              aff_def_params=aff_def_params,
-    #                              intens_scale_params=intens_scale_params)
-    #         if not self.logging_wandb_disabled:
-    #             wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-    #             wandb.log({f'{dset_str}/inf_best_score': best_score})
-    #         self.log_images(i, dset, mode=dset_str,
-    #                         latent_params=optimized_latent,
-    #                         aff_def_params=optimized_affine_def,
-    #                         intens_scale_params=optimized_intensity_def)
-    #         self.log_volume(i, dset, mode=dset_str,
-    #                         latent_params=optimized_latent,
-    #                         aff_def_params=optimized_affine_def)
+        dset_str = 'val'
+        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        for i in range(0, len(dset)):
+            latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+                = self.inference(i, dset,
+                                 latent_params=latent_params,
+                                 aff_def_params=aff_def_params,
+                                 intens_scale_params=intens_scale_params)
+            if not self.logging_wandb_disabled:
+                wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+                wandb.log({f'{dset_str}/inf_best_score': best_score})
+            self.log_images(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def,
+                            intens_scale_params=optimized_intensity_def)
+            self.log_volume(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def)
+
+    def do_testing(self, dset=None, dset_str = 'test'):
+        if dset is None:
+            dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        for i in range(0, len(dset)):
+            latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+            # latent_params, aff_def_params, intens_scale_params \
+            #     = self.subj_latents[i:i+1].cuda(), self.aff_deform_params[i:i+1].cuda(), self.intensity_scale_params[i:i+1].cuda()
+            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+                = self.inference(i, dset,
+                                 latent_params=latent_params,
+                                 aff_def_params=aff_def_params,
+                                 intens_scale_params=intens_scale_params,
+                                 dset_str=dset_str)
+            if not self.logging_wandb_disabled:
+                wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+                wandb.log({f'{dset_str}/inf_best_score': best_score})
+            self.log_images(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def,
+                            intens_scale_params=optimized_intensity_def)
+            self.log_volume(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def)
 
     def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
         return CardiacUKBBValidation([dset.data_paths[subj_idx]],
@@ -559,7 +591,7 @@ class INR_AutoReg(pl.LightningModule):
                                      dset.num_coords, to_gpu=True)
 
     def initialize_inference_params(self):
-        latent_params = torch.randn((1, self.latent_size), dtype=torch.float32, device="cuda") * 1e-2
+        latent_params = torch.randn((1, self.latent_size), dtype=torch.float32, device="cuda")*1e-3
         aff_def_params = torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda")
         intens_scale_params = torch.zeros((1, self.max_slices, 1), dtype=torch.float32, device="cuda")
         return latent_params, aff_def_params, intens_scale_params
@@ -569,12 +601,12 @@ class INR_AutoReg(pl.LightningModule):
                   latent_params: torch.Tensor,
                   aff_def_params: torch.Tensor,
                   intens_scale_params: torch.Tensor,
-                  supervize_seg: bool = False,  # By default, we assume we don't have segmentation at inf time
+                  dset_str: str = 'val',
+                  supervise_seg: bool = True,  # By default, we assume we don't have segmentation at inf time
                   optimize_latent_params: bool = True,
                   optimize_aff_def_params: bool = True,
                   optimize_intens_scale_params: bool = True,
-                  dset_str: str = 'val'):
-        assert False, 'fix regist' # TODO
+                  ):
         instance_dset = CardiacUKBBValidation([dset.data_paths[subj_idx]],
                                               dset.max_slices, dset.max_slice_shape,
                                               dset.num_coords, to_gpu=True)
@@ -587,9 +619,9 @@ class INR_AutoReg(pl.LightningModule):
             save_path.parent.mkdir(exist_ok=True)
             save_image(instance_dset.image_pad[0, :6, ..., 0].reshape(-1, instance_dset.image_pad.shape[-3]), str(save_path))
         # Parameters to optimize
-        inf_subj_latents = nn.Parameter(latent_params, requires_grad=optimize_latent_params)
-        inf_aff_def_params = nn.Parameter(aff_def_params, requires_grad=optimize_aff_def_params)
-        inf_intens_scale_params = nn.Parameter(intens_scale_params, requires_grad=optimize_intens_scale_params)
+        inf_subj_latents = nn.Parameter(latent_params, requires_grad=True)
+        inf_aff_def_params = nn.Parameter(aff_def_params, requires_grad=True)
+        inf_intens_scale_params = nn.Parameter(intens_scale_params, requires_grad=True)
         best_inf_subj_latents = torch.clone(inf_subj_latents)
         best_inf_aff_def_params = torch.clone(inf_aff_def_params)
         best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
@@ -615,15 +647,17 @@ class INR_AutoReg(pl.LightningModule):
             if optimize_intens_scale_params: opt_intensity_def.zero_grad()
             # Make predictions for this batch
             values_pred, seg_pred, _, values_pred_d, _ = self.forward_with_point_spread(
-                                                                   coords_voxel, aff_params_padded,
-                                                                   spacings_padded, needs_flip_padded,
-                                                                   slice_idx,
-                                                                   min_coords, max_coords,
-                                                                   latent_params=inf_subj_latents[subject_idx],
-                                                                   aff_def_params=inf_aff_def_params[subject_idx],
-                                                                   point_spread_size=self.point_spread_size_after,
-                                                                   point_spread_std=self.point_spread_std,
-                                                                   return_deriv=self.supervise_deriv)
+                   coords_voxel, aff_params_padded,
+                   spacings_padded, needs_flip_padded,
+                   slice_idx,
+                   min_coords, max_coords,
+                   latent_params=inf_subj_latents[subject_idx],
+                   aff_def_params=inf_aff_def_params[subject_idx],
+                   point_spread_size=self.point_spread_size_before if i < self.inf_point_spread_start_epoch else self.point_spread_size_after,
+                   point_spread_std=self.point_spread_std_before if i < self.inf_point_spread_start_epoch else self.point_spread_std_after,
+                   return_deriv=self.supervise_deriv,
+                   return_def=False,
+                   inference=True)
             values_deform = self.apply_intensity_scaling(img_values, coords_voxel, slice_idx, intens_scale_params)
             # Recon loss
             loss_recon = self.psnr_loss(values_pred, values_deform)
@@ -633,7 +667,7 @@ class INR_AutoReg(pl.LightningModule):
             dice_per_class = 1 - loss_seg_per_class
             # Seg loss is only supervized if user explicitly wants to
             loss_seg = torch.tensor((0.0,), device=loss_recon.device)
-            if supervize_seg:
+            if supervise_seg:
                 loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
             # Regularization losses
             reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(inf_aff_def_params[subject_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
@@ -657,7 +691,7 @@ class INR_AutoReg(pl.LightningModule):
             # Metrics for logging
             metrics['step'].append(i)
             metrics['loss_recon'].append(loss_recon.item())
-            metrics['PSRN'].append(-1. * loss_recon.item())
+            metrics['PSNR'].append(-1. * loss_recon.item())
             metrics['loss_dt'].append(loss_dt.item())
             [metrics[k].append(v.item()) for k, v in reg_dict.items()]
             metrics['loss_seg'].append(loss_seg.item())
@@ -666,7 +700,7 @@ class INR_AutoReg(pl.LightningModule):
             metrics['dice_LV'].append(dice_per_class[1].item())
             metrics['dice_MYO'].append(dice_per_class[2].item())
             metrics['dice_RV'].append(dice_per_class[3].item())
-            curr_score = np.mean(metrics['dice_FG'][-best_score_window_size:])
+            curr_score = np.mean(metrics['PSNR'][-best_score_window_size:])
             metrics['best_step'].append(curr_score)
             if best_score is None or curr_score > best_score:
                 best_score = curr_score
@@ -675,8 +709,9 @@ class INR_AutoReg(pl.LightningModule):
                 best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
                 best_inf_step_num = i
         # Logging  -------------------------------------------------------------------------
+        print('Best inf step num:', best_inf_step_num)
         if self.logging_disabled:
-            return inf_subj_latents, inf_aff_def_params, inf_intens_scale_params
+            return best_inf_subj_latents, best_inf_aff_def_params, best_inf_intens_scale_params, best_inf_step_num, best_score
         log_name = f"{dset_str}_inf_metrics"
         log_dir = self.log_path / log_name
         log_dir.mkdir(exist_ok=True)
@@ -708,7 +743,7 @@ class INR_AutoReg(pl.LightningModule):
                                               title=f"{k} metric over inference optimization",
                                               xname="Optimization steps")
                 wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}': plot})
-
+        print('Best inf step num:', best_inf_step_num)
         return best_inf_subj_latents, best_inf_aff_def_params, best_inf_intens_scale_params, best_inf_step_num, best_score
 
     @torch.no_grad()
@@ -755,7 +790,7 @@ class INR_AutoReg(pl.LightningModule):
                         coord_min, coord_max,
                         latent_params=latent_params,
                         aff_def_params=aff_def_params,
-                        return_deriv=True, return_def=True)
+                        return_deriv=True, return_def=True, inference=True)
                 pred_seg_, pred_vals_, pred_deform_, pred_vals_d_ \
                     = pred_seg_.detach(), pred_vals_.detach(), pred_deform_.detach(), pred_vals_d_.detach()
 
@@ -813,7 +848,8 @@ class INR_AutoReg(pl.LightningModule):
                         latent_params=latent_params,
                         aff_def_params=None,
                         return_deriv=False,
-                        return_def=True)
+                        return_def=True,
+                        inference=True)
                 pred_img_no_def = pred_vals_no_def_.detach().reshape(H, W)
                 pred_img_no_def_diff = (pred_img_no_def - pred_img).abs()
                 pred_img_no_def_diff = torch.stack([pred_img_no_def_diff.abs()] * 3, dim=0)
@@ -953,7 +989,7 @@ class INR_AutoReg(pl.LightningModule):
             z_def_quiver_slices = []
             for z in range(res[-1]):
                 c_z = c[:,:,z:z+1]
-                pred_vals_, pred_seg_, pred_def_ = self.forward_inr(c_z.reshape(1, -1, 4), latent_params)
+                pred_vals_, pred_seg_, pred_def_ = self.forward_inr(c_z.reshape(1, -1, 4), latent_params, inference=True)
                 pred_seg = pred_seg_.argmax(-1).reshape(c_z.shape[:-1])
                 pred_vals_ = pred_vals_.clip(0.0, 1.0)
                 pred_val = pred_vals_.reshape(c_z.shape[:-1])
