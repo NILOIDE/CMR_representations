@@ -44,6 +44,7 @@ class CardiacUKBB(Dataset):
             # image_ddt = torch.tensor(f['image_dd_padded'][selected_frame, 5:6], dtype=torch.float32).moveaxis(0, -1)
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
+            image_mask[:3] = False
             seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
             la_gt_available = torch.ones_like(seg, dtype=torch.bool)
             la_gt_available[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)

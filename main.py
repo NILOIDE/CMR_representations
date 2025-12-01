@@ -23,8 +23,8 @@ class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
     max_epochs: int = 1_000_000
-    logging_disabled: bool = True
-    logging_wandb_disabled: bool = True
+    logging_disabled: bool = False
+    logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
     logging_rate: int = 5_000
     logging_start_rate: int = 20_000
