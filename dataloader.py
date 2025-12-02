@@ -188,8 +188,8 @@ class CMRDataModule(pl.LightningDataModule):
             seg_interp_files = [str(x) for x in seg_interp_files]
             # Segmentations
             seg_la_files_auto = [Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_2ch.nii.gz',
-                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_3ch.nii.gz',
-                            Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_4ch.nii.gz']
+                                 Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_3ch.nii.gz',
+                                 Path(os.path.join(self.load_la_dir, parent)) / 'seg_lv_la_4ch.nii.gz']
             seg_sa_files = sorted(list(Path(os.path.join(self.load_sa_dir, parent, "sa_slices")).rglob('seg_sa*')))
             seg_sa_files_auto = [i for i in seg_sa_files if 'labels' not in i.name]
             seg_files_auto = seg_la_files_auto + seg_sa_files_auto
