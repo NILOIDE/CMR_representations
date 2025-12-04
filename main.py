@@ -84,13 +84,15 @@ class Params:
     # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
     # Inference ----------
     inference: bool = True
-    inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
+    inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=042999.ckpt"
     inf_max_epochs: int = 2500
     inf_num_coords: int = 35_000
-    inf_learning_rate: float = 1e-3
+    inf_learning_rate_inr: float = 1e-5
+    inf_learning_rate_latent: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
     inf_learning_rate_def: float = 1e-3
-    inf_point_spread_start_epoch: int = 9999
+    inf_point_spread_start_epoch: int = 2500
+    inf_weight_loss_seg: float = 0e0
 
 
 def main():
@@ -102,6 +104,8 @@ def main():
     params = tyro.cli(Params)
     print(params)
 
+    if params.inference and 'inference' not in params.job_name:
+        params.job_name = f'inference_{params.job_name}' if params.job_name else 'inference'
     model_path_parent = Path(params.trained_models_dir)
     model_path_parent.mkdir(exist_ok=True)
     model_path = model_path_parent / (f'{datetime.now().strftime("%Y%m%d-%H%M%S")}' + (f'-{params.job_name}' if params.job_name else ""))
@@ -124,7 +128,7 @@ def main():
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
-    os.environ['WANDB_DISABLED'] = str(params.logging_disabled)
+    os.environ['WANDB_DISABLED'] = str(params.logging_wandb_disabled)
     logger = WandbLogger(project="CMR-Align")
     logger.log_hyperparams(params.__dict__)
     print('Params', params)

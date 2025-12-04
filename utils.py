@@ -510,7 +510,7 @@ def data_frame_to_line_plot(df, x, metric_name, subj_idx, save_path):
     plt.figure(figsize=(10, 6))
     # Plot each column
     for column in df.columns:
-        plt.plot(list(x['step']), list(df[column]), label=column, marker='o')
+        plt.plot(list(x[column]), list(df[column]), label=column, marker='o')
     plt.xlabel('Step')
     plt.ylabel(metric_name)
     plt.title(f'{str(subj_idx)}_{metric_name}')

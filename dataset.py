@@ -113,7 +113,7 @@ class CardiacUKBBValidation(CardiacUKBB):
         self.image_dt = torch.zeros(self.image_pad.shape, dtype=torch.float32, device=device).unsqueeze(-1)
         self.image_mask = torch.zeros(self.image_pad.shape, dtype=torch.bool, device=device)
         self.seg = torch.zeros(self.image_pad.shape, dtype=torch.uint8, device=device)
-        self.la_gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool, device=device)
+        self.gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool, device=device)
         self.non_padding_indices = [None]*self.num_subjs
         self.coord_max = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
         self.coord_min = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
@@ -138,12 +138,12 @@ class CardiacUKBBValidation(CardiacUKBB):
                 # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
                 self.image_mask[i, :S, :H, :W, :T] = torch.tensor(f['image_padded_mask'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.seg[i, :S, :H, :W, :T] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8).moveaxis(0, -1)
-                self.la_gt_available[i, :S, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
+                self.gt_available[i, :S, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.image_pad = self.image_pad[:,:,:H,:W]
                 self.image_dt = self.image_dt[:,:,:H,:W]
                 self.image_mask = self.image_mask[:,:,:H,:W]
                 self.seg = self.seg[:,:,:H,:W]
-                self.la_gt_available = self.la_gt_available[:,:,:H,:W]
+                self.gt_available = self.gt_available[:, :, :H, :W]
                 # Get available non-padding indices in frame
                 non_padding_indices = make_masked_coordinate_tensor(self.image_mask[i, ..., 0])
                 # Add the time index to get the full volume index
@@ -166,7 +166,7 @@ class CardiacUKBBValidation(CardiacUKBB):
         (img, img_dt, seg, gt_avail,
          non_padding_indices, min_coords, max_coords, num_subj_slices,
          aff_params_padded, spacings_padded, needs_flip_padded) = (
-            self.image_pad[idx, :, :, :, frame], self.image_dt[idx, :, :, :, frame], self.seg[idx, :, :, :, frame], self.la_gt_available[idx, :, :, :, frame],
+            self.image_pad[idx, :, :, :, frame], self.image_dt[idx, :, :, :, frame], self.seg[idx, :, :, :, frame], self.gt_available[idx, :, :, :, frame],
             self.non_padding_indices[idx], self.coord_min[idx], self.coord_max[idx], self.num_subj_slices[idx],
             self.aff_params_padded[idx], self.spacings_padded[idx], self.flippings_padded[idx])
 

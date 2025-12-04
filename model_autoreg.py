@@ -5,7 +5,7 @@ import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
-from typing import Tuple, Dict, Optional, List, Union, Any
+from typing import Tuple, Dict, Optional, List, Union, Any, Iterable
 
 import kornia
 import numpy as np
@@ -110,9 +110,11 @@ class INR_AutoReg(pl.LightningModule):
         self.lr_aff = kwargs["learning_rate_aff"]
         self.lr_def = kwargs["learning_rate_def"]
         # Inference hyperparams
+        self.inf_weight_loss_seg = kwargs["inf_weight_loss_seg"]
         self.inf_max_epochs = kwargs["inf_max_epochs"]
         self.inf_num_coords = kwargs["inf_num_coords"]
-        self.inf_lr = kwargs["inf_learning_rate"]
+        self.inf_lr_inr = kwargs["inf_learning_rate_inr"]
+        self.inf_lr_latent = kwargs["inf_learning_rate_latent"]
         self.inf_lr_aff = kwargs["inf_learning_rate_aff"]
         self.inf_lr_def = kwargs["inf_learning_rate_def"]
         self.inf_point_spread_start_epoch = kwargs['inf_point_spread_start_epoch']
@@ -545,11 +547,27 @@ class INR_AutoReg(pl.LightningModule):
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, len(dset)):
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+            opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
+            opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
+            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
+            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
                 = self.inference(i, dset,
                                  latent_params=latent_params,
                                  aff_def_params=aff_def_params,
-                                 intens_scale_params=intens_scale_params)
+                                 intens_scale_params=intens_scale_params,
+                                 opt_latent=opt_latent,
+                                 opt_affine_def=opt_affine_def,
+                                 opt_intensity_def=opt_intensity_def,
+                                 dset_str = dset_str,
+                                 max_epochs=self.inf_max_epochs,
+                                 point_spread_size_before = self.point_spread_size_before,
+                                 point_spread_size_after = self.point_spread_size_after,
+                                 point_spread_std_before = self.point_spread_std_before.squeeze().tolist(),
+                                 point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
+                                 point_spread_start_epoch = self.inf_point_spread_start_epoch,
+                                 weight_loss_seg = self.inf_weight_loss_seg,
+                                 weight_loss_deriv = self.weight_loss_deriv,
+                                 )
             if not self.logging_wandb_disabled:
                 wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
                 wandb.log({f'{dset_str}/inf_best_score': best_score})
@@ -566,24 +584,72 @@ class INR_AutoReg(pl.LightningModule):
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, len(dset)):
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+            # Optimizers (None if we do not want to optimize)
+            opt_latent = torch.optim.Adam([latent_params], lr=self.inf_lr_latent)
+            opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.inf_lr_aff)
+            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.inf_lr_def)
+            opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.inf_lr_inr)
             # latent_params, aff_def_params, intens_scale_params \
             #     = self.subj_latents[i:i+1].cuda(), self.aff_deform_params[i:i+1].cuda(), self.intensity_scale_params[i:i+1].cuda()
-            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score \
+            (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
+             opt_latent, opt_affine_def, opt_intensity_def, opt_inr) \
                 = self.inference(i, dset,
                                  latent_params=latent_params,
                                  aff_def_params=aff_def_params,
                                  intens_scale_params=intens_scale_params,
-                                 dset_str=dset_str)
-            if not self.logging_wandb_disabled:
-                wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-                wandb.log({f'{dset_str}/inf_best_score': best_score})
-            self.log_images(i, dset, mode=dset_str,
-                            latent_params=optimized_latent,
-                            aff_def_params=optimized_affine_def,
-                            intens_scale_params=optimized_intensity_def)
-            self.log_volume(i, dset, mode=dset_str,
-                            latent_params=optimized_latent,
-                            aff_def_params=optimized_affine_def)
+                                 opt_latent=opt_latent,
+                                 opt_affine_def=opt_affine_def,
+                                 opt_intensity_def=opt_intensity_def,
+                                 opt_inr=opt_inr,
+                                 dset_str=dset_str,
+                                 max_epochs=self.inf_max_epochs,
+                                 point_spread_size_before=self.point_spread_size_before,
+                                 point_spread_size_after=self.point_spread_size_after,
+                                 point_spread_std_before=self.point_spread_std_before.squeeze().tolist(),
+                                 point_spread_std_after=self.point_spread_std_after.squeeze().tolist(),
+                                 point_spread_start_epoch=self.inf_point_spread_start_epoch,
+                                 weight_loss_seg=self.inf_weight_loss_seg,
+                                 weight_loss_deriv=self.weight_loss_deriv,
+                                 )
+            starting_inr_weights = self.canonical_inr.state_dict()
+            curr_step = self.inf_max_epochs
+            for s in [0, 500, 1000, 2500, 5000]:
+                dset_str_ft = dset_str + f"_ft{s:04d}"
+                if s > 0:
+                    (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
+                     opt_latent, opt_affine_def, opt_intensity_def, opt_inr) \
+                        = self.inference(i, dset,
+                                         latent_params=optimized_latent,
+                                         aff_def_params=optimized_affine_def,
+                                         intens_scale_params=optimized_intensity_def,
+                                         opt_latent=opt_latent,
+                                         opt_affine_def=opt_affine_def,
+                                         opt_intensity_def=opt_intensity_def,
+                                         opt_inr=opt_inr,
+                                         dset_str=dset_str_ft,
+                                         max_epochs=self.inf_max_epochs+s,
+                                         epochs_elapsed=curr_step,
+                                         point_spread_size_before=self.point_spread_size_before,
+                                         point_spread_size_after=self.point_spread_size_after,
+                                         point_spread_std_before=self.point_spread_std_before.squeeze().tolist(),
+                                         point_spread_std_after=self.point_spread_std_after.squeeze().tolist(),
+                                         point_spread_start_epoch=self.inf_point_spread_start_epoch,
+                                         weight_loss_seg=self.inf_weight_loss_seg,
+                                         weight_loss_deriv=self.weight_loss_deriv,
+                                         optimize_latent_params=True,
+                                         optimize_aff_def_params=False,
+                                         optimize_intens_scale_params=False,
+                                         optimize_decoder=True,
+                    )
+                curr_step = self.inf_max_epochs + s
+                self.log_images(i, dset, mode=dset_str_ft,
+                                         latent_params=optimized_latent,
+                                         aff_def_params=optimized_affine_def,
+                                         intens_scale_params=optimized_intensity_def,)
+                self.log_volume(i, dset, mode=dset_str_ft,
+                                         latent_params=optimized_latent,
+                                         aff_def_params=optimized_affine_def)
+            self.canonical_inr.load_state_dict(starting_inr_weights)
 
     def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
         return CardiacUKBBValidation([dset.data_paths[subj_idx]],
@@ -591,9 +657,9 @@ class INR_AutoReg(pl.LightningModule):
                                      dset.num_coords, to_gpu=True)
 
     def initialize_inference_params(self):
-        latent_params = torch.randn((1, self.latent_size), dtype=torch.float32, device="cuda")*1e-3
-        aff_def_params = torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda")
-        intens_scale_params = torch.zeros((1, self.max_slices, 1), dtype=torch.float32, device="cuda")
+        latent_params = nn.Parameter(torch.randn((1, self.latent_size), dtype=torch.float32, device="cuda")*1e-3, requires_grad=True)
+        aff_def_params = nn.Parameter(torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda"), requires_grad=True)
+        intens_scale_params = nn.Parameter(torch.zeros((1, self.max_slices, 1), dtype=torch.float32, device="cuda"), requires_grad=True)
         return latent_params, aff_def_params, intens_scale_params
 
     def inference(self, subj_idx: int,
@@ -601,12 +667,39 @@ class INR_AutoReg(pl.LightningModule):
                   latent_params: torch.Tensor,
                   aff_def_params: torch.Tensor,
                   intens_scale_params: torch.Tensor,
+                  opt_latent: Optional[torch.optim.Optimizer] = None,
+                  opt_affine_def: Optional[torch.optim.Optimizer] = None,
+                  opt_intensity_def: Optional[torch.optim.Optimizer] = None,
+                  opt_inr: Optional[torch.optim.Optimizer] = None,
                   dset_str: str = 'val',
-                  supervise_seg: bool = True,  # By default, we assume we don't have segmentation at inf time
                   optimize_latent_params: bool = True,
                   optimize_aff_def_params: bool = True,
                   optimize_intens_scale_params: bool = True,
+                  optimize_decoder: bool = False,  # By default, we don't want to optimise network
+                  max_epochs: int = 2000,
+                  epochs_elapsed: int = 0,  # If you want to continue inference
+                  point_spread_size_before: int = 1,
+                  point_spread_size_after: int = 16,
+                  point_spread_std_before: Iterable[float] = (0.01, 0.01, 0.01, 0.01),
+                  point_spread_std_after: Iterable[float] = (0.4, 0.4, 0.4, 0.4),
+                  point_spread_start_epoch: int = 0,
+                  weight_loss_seg: float = 0.0,  # By default, we assume we don't have segmentation at inf time
+                  weight_loss_deriv: float = 0.0,
+                  score_window_size=20,
+                  log=True,
                   ):
+        # Optimizers (won't be used if not supervised)
+        opt_latent = torch.optim.Adam([latent_params], lr=self.lr) if opt_latent is None else opt_latent
+        opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff) if opt_affine_def is None else opt_affine_def
+        opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def) if opt_intensity_def is None else opt_intensity_def
+        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.lr) if opt_inr is None else opt_inr
+
+        point_spread_std_before = torch.tensor(point_spread_std_before, dtype=torch.float32, device="cuda"
+                                               ).reshape(1, 1, 1, self.coord_size)
+        point_spread_std_after = torch.tensor(point_spread_std_after, dtype=torch.float32, device="cuda"
+                                              ).reshape(1, 1, 1, self.coord_size)
+        supervise_seg = weight_loss_seg > 0
+        supervise_deriv = weight_loss_deriv > 0
         instance_dset = CardiacUKBBValidation([dset.data_paths[subj_idx]],
                                               dset.max_slices, dset.max_slice_shape,
                                               dset.num_coords, to_gpu=True)
@@ -618,23 +711,12 @@ class INR_AutoReg(pl.LightningModule):
             save_path.parent.parent.mkdir(exist_ok=True)
             save_path.parent.mkdir(exist_ok=True)
             save_image(instance_dset.image_pad[0, :6, ..., 0].reshape(-1, instance_dset.image_pad.shape[-3]), str(save_path))
-        # Parameters to optimize
-        inf_subj_latents = nn.Parameter(latent_params, requires_grad=True)
-        inf_aff_def_params = nn.Parameter(aff_def_params, requires_grad=True)
-        inf_intens_scale_params = nn.Parameter(intens_scale_params, requires_grad=True)
-        best_inf_subj_latents = torch.clone(inf_subj_latents)
-        best_inf_aff_def_params = torch.clone(inf_aff_def_params)
-        best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
+
         best_score = None
         best_inf_step_num = 0
-        best_score_window_size = 20
-
-        # Optimizers (None if we do not want to optimize)
-        opt_latent = None if not optimize_latent_params else torch.optim.Adam([inf_subj_latents], lr=self.inf_lr)
-        opt_affine_def = None if not optimize_aff_def_params else torch.optim.Adam([inf_aff_def_params], lr=self.inf_lr_aff)
-        opt_intensity_def = None if not optimize_intens_scale_params else torch.optim.Adam([inf_intens_scale_params], lr=self.inf_lr_def)
         metrics = defaultdict(list)
-        for i in tqdm.tqdm(range(self.inf_max_epochs), desc=f"Performing inference for subject idx {subj_idx} (id {subj_id})"):
+        for i in tqdm.tqdm(range(epochs_elapsed, max_epochs), desc=f"Performing inference {'with' if supervise_seg else 'WITHOUT'} "
+                                                   f"seg supervision for subject idx {subj_idx} (id {subj_id}) until epoch {max_epochs}"):
             # Get batch elements
             batch = (b[None].cuda() for b in instance_dset.__getitem__(0))
             (coords_voxel, img_values, img_dt_values, seg_gt, gt_avail,
@@ -645,16 +727,17 @@ class INR_AutoReg(pl.LightningModule):
             if optimize_latent_params: opt_latent.zero_grad()
             if optimize_aff_def_params: opt_affine_def.zero_grad()
             if optimize_intens_scale_params: opt_intensity_def.zero_grad()
+            if optimize_decoder: opt_inr.zero_grad()
             # Make predictions for this batch
             values_pred, seg_pred, _, values_pred_d, _ = self.forward_with_point_spread(
                    coords_voxel, aff_params_padded,
                    spacings_padded, needs_flip_padded,
                    slice_idx,
                    min_coords, max_coords,
-                   latent_params=inf_subj_latents[subject_idx],
-                   aff_def_params=inf_aff_def_params[subject_idx],
-                   point_spread_size=self.point_spread_size_before if i < self.inf_point_spread_start_epoch else self.point_spread_size_after,
-                   point_spread_std=self.point_spread_std_before if i < self.inf_point_spread_start_epoch else self.point_spread_std_after,
+                   latent_params=latent_params[subject_idx],
+                   aff_def_params=aff_def_params[subject_idx],
+                   point_spread_size=point_spread_size_before if i < point_spread_start_epoch else point_spread_size_after,
+                   point_spread_std=point_spread_std_before if i < point_spread_start_epoch else point_spread_std_after,
                    return_deriv=self.supervise_deriv,
                    return_def=False,
                    inference=True)
@@ -665,22 +748,22 @@ class INR_AutoReg(pl.LightningModule):
             seg_pred, segs = seg_pred * gt_avail[..., None], seg_gt * gt_avail[..., None]
             loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1, 1), segs.moveaxis(-1, 1)).mean(-1).mean(0)
             dice_per_class = 1 - loss_seg_per_class
-            # Seg loss is only supervized if user explicitly wants to
+            # Seg loss is only supervised if user explicitly wants to
             loss_seg = torch.tensor((0.0,), device=loss_recon.device)
             if supervise_seg:
-                loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
+                loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * weight_loss_seg
             # Regularization losses
-            reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(inf_aff_def_params[subject_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
-            reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(inf_subj_latents[subject_idx], self.weight_reg_lat)
-            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(inf_intens_scale_params[subject_idx], self.weight_intensity_scale, num_subj_slices=num_subj_slices)
+            reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(latent_params[subject_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
+            reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(aff_def_params[subject_idx], self.weight_reg_lat)
+            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(intens_scale_params[subject_idx], self.weight_intensity_scale, num_subj_slices=num_subj_slices)
             loss_reg = reg_aff_loss + reg_lat_loss + reg_int_scale_loss
             reg_dict = {f"loss_reg": loss_reg,
                         **reg_aff_dict, **reg_lat_dict,
                         **reg_int_scale_dict,}
             # Recon derivative loss
             loss_dt = torch.tensor((0.0,), device=loss_recon.device)
-            if self.supervise_deriv:
-                loss_dt = self.psnr_loss(values_pred_d[...,-1:], img_dt_values*50) * self.weight_loss_deriv
+            if supervise_deriv:
+                loss_dt = self.psnr_loss(values_pred_d[...,-1:], img_dt_values*50) * weight_loss_deriv
             loss = loss_recon + loss_seg + loss_reg + loss_dt
             # Backprop only image-based losses and regularization losses (we assume we don't have seg GT)
             loss.backward()
@@ -688,6 +771,7 @@ class INR_AutoReg(pl.LightningModule):
             if optimize_latent_params: opt_latent.step()
             if optimize_aff_def_params: opt_affine_def.step()
             if optimize_intens_scale_params: opt_intensity_def.step()
+            if optimize_decoder: opt_inr.step()
             # Metrics for logging
             metrics['step'].append(i)
             metrics['loss_recon'].append(loss_recon.item())
@@ -700,51 +784,54 @@ class INR_AutoReg(pl.LightningModule):
             metrics['dice_LV'].append(dice_per_class[1].item())
             metrics['dice_MYO'].append(dice_per_class[2].item())
             metrics['dice_RV'].append(dice_per_class[3].item())
-            curr_score = np.mean(metrics['PSNR'][-best_score_window_size:])
+            curr_score = np.mean(metrics['PSNR'][-score_window_size:])
             metrics['best_step'].append(curr_score)
             if best_score is None or curr_score > best_score:
                 best_score = curr_score
-                best_inf_subj_latents = torch.clone(inf_subj_latents)
-                best_inf_aff_def_params = torch.clone(inf_aff_def_params)
-                best_inf_intens_scale_params = torch.clone(inf_intens_scale_params)
                 best_inf_step_num = i
         # Logging  -------------------------------------------------------------------------
         print('Best inf step num:', best_inf_step_num)
-        if self.logging_disabled:
-            return best_inf_subj_latents, best_inf_aff_def_params, best_inf_intens_scale_params, best_inf_step_num, best_score
-        log_name = f"{dset_str}_inf_metrics"
-        log_dir = self.log_path / log_name
-        log_dir.mkdir(exist_ok=True)
-        window_size = 20
-        if 'step' not in self.inference_metrics:
-            steps = [sum(metrics['step'][i:i+window_size]) / len(metrics['step'][i:i+window_size])
-                     for i in range(0, len(metrics['step']), window_size)]
-            self.inference_metrics['step'] = pd.DataFrame(steps, columns=['step'])
-        for k, v in metrics.items():
-            if k == 'step':
-                continue
-            v = [sum(v[i:i+window_size]) / len(v[i:i+window_size]) for i in range(0, len(v), window_size)]
-            if k not in self.inference_metrics:
-                # If no previous dataframe, create dataframe with column for this epoch
-                self.inference_metrics[k] = pd.DataFrame(v, columns=[f"{k}_{self.current_epoch:06d}"])
-            else:
-                # Add column for this epoch
-                self.inference_metrics[k][f"{k}_{self.current_epoch:06d}"] = v
+        if not self.logging_disabled and log:
+            log_name = f"{dset_str}_inf_metrics"
+            log_dir = self.log_path / log_name / subj_id
+            log_dir.mkdir(exist_ok=True, parents=True)
+            # if 'step' not in self.inference_metrics:
+            #     self.inference_metrics['step'] = {}
+            # steps = [sum(metrics['step'][i:i+score_window_size]) / len(metrics['step'][i:i+score_window_size]) for i in range(0, len(metrics['step']), score_window_size)]
+            # if subj_id not in self.inference_metrics['step']:
+            #     self.inference_metrics['step'][subj_id] = pd.DataFrame(steps, columns=['step'])
+            # else:
+            #     self.inference_metrics['step'][subj_id]['step']._append(pd.Series(steps))
+            for k, v in metrics.items():
+                v = [sum(v[i:i+score_window_size]) / len(v[i:i+score_window_size]) for i in range(0, len(v), score_window_size)]
+                v = pd.DataFrame(v, columns=[f"Epoch {self.current_epoch:06d}"])
+                if k not in self.inference_metrics:
+                    self.inference_metrics[k] = {}
+                if subj_id not in self.inference_metrics[k]:
+                    # If no previous dataframe, create dataframe with column for this epoch
+                    self.inference_metrics[k][subj_id] = v
+                else:
+                    if f"Epoch {self.current_epoch:06d}" not in self.inference_metrics[k][subj_id]:
+                        # Add column for this epoch
+                        self.inference_metrics[k][subj_id][f"Epoch {self.current_epoch:06d}"] = v
+                    else:
+                        self.inference_metrics[k][subj_id] = pd.concat((self.inference_metrics[k][subj_id], v))
 
-            self.inference_metrics[k].to_csv(str(self.log_path / f'{k}_{str(subj_idx)}.csv'))
-            save_path = str(log_dir / f"inf_lines_{str(subj_idx)}_{k}.png")
-            data_frame_to_line_plot(self.inference_metrics[k], self.inference_metrics['step'], k, str(subj_idx),
-                                    save_path=save_path)
-            if not self.logging_wandb_disabled:
-                wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}_plot': wandb.Image(save_path)})
-                plot = wandb.plot.line_series(xs=list(self.inference_metrics['step']),
-                                              ys=[list(self.inference_metrics[k][i]) for i in list(self.inference_metrics[k].columns)],
-                                              keys=list(self.inference_metrics[k].columns),
-                                              title=f"{k} metric over inference optimization",
-                                              xname="Optimization steps")
-                wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}': plot})
-        print('Best inf step num:', best_inf_step_num)
-        return best_inf_subj_latents, best_inf_aff_def_params, best_inf_intens_scale_params, best_inf_step_num, best_score
+
+                self.inference_metrics[k][subj_id].to_csv(str(log_dir / f'{k}.csv'))
+                save_path = str(log_dir / f"inf_lines_{k}.png")
+                data_frame_to_line_plot(self.inference_metrics[k][subj_id], self.inference_metrics['step'][subj_id],
+                                        k, str(subj_idx), save_path=save_path)
+                # if not self.logging_wandb_disabled:
+                #     wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}_plot': wandb.Image(save_path)})
+                #     plot = wandb.plot.line_series(xs=list(self.inference_metrics['step'][subj_id]),
+                #                                   ys=[list(self.inference_metrics[k][subj_id][i]) for i in list(self.inference_metrics[k][subj_id].columns)],
+                #                                   keys=list(self.inference_metrics[k][subj_id].columns),
+                #                                   title=f"{k} metric over inference optimization",
+                #                                   xname="Optimization steps")
+                #     wandb.log({f'{log_name}/subj_{str(subj_id)}_inf_metric_{k}': plot})
+        return (latent_params, aff_def_params, intens_scale_params,
+                best_inf_step_num, best_score, opt_latent, opt_affine_def, opt_intensity_def, opt_inr)
 
     @torch.no_grad()
     def log_images(self,
@@ -834,71 +921,73 @@ class INR_AutoReg(pl.LightningModule):
                 images_dt_norm_abs = torch.stack([images_dt_norm[0, s].abs()] * 3, dim=0)
                 pred_img_dt = torch.stack([pred_img_dt.abs()] * 3, dim=0)
                 # Learnable intensity scale
-                pred_img_int_scale_undo_ = self.apply_intensity_scaling(pred_vals_, voxel_indices_, slice_idx_,
-                                                                intens_scale_params=intens_scale_params, inverse=True)
-                pred_img_int_scale_undo = pred_img_int_scale_undo_.reshape(pred_img.shape)
-                pred_img_int_scale_undo = torch.stack([pred_img_int_scale_undo.abs()] * 3, dim=0)
-                # Learnable affine params
-                with torch.enable_grad():
-                    pred_vals_no_def_, *_ = self.forward(
-                        voxel_indices_, aff_params_padded,
-                        spacings_padded, flippings_padded,
-                        slice_idx_,
-                        coord_min, coord_max,
-                        latent_params=latent_params,
-                        aff_def_params=None,
-                        return_deriv=False,
-                        return_def=True,
-                        inference=True)
-                pred_img_no_def = pred_vals_no_def_.detach().reshape(H, W)
-                pred_img_no_def_diff = (pred_img_no_def - pred_img).abs()
-                pred_img_no_def_diff = torch.stack([pred_img_no_def_diff.abs()] * 3, dim=0)
+                # pred_img_int_scale_undo_ = self.apply_intensity_scaling(pred_vals_, voxel_indices_, slice_idx_,
+                #                                                 intens_scale_params=intens_scale_params, inverse=True)
+                # pred_img_int_scale_undo = pred_img_int_scale_undo_.reshape(pred_img.shape)
+                # pred_img_int_scale_undo = torch.stack([pred_img_int_scale_undo.abs()] * 3, dim=0)
+                # # Learnable affine params
+                # with torch.enable_grad():
+                #     pred_vals_no_def_, *_ = self.forward(
+                #         voxel_indices_, aff_params_padded,
+                #         spacings_padded, flippings_padded,
+                #         slice_idx_,
+                #         coord_min, coord_max,
+                #         latent_params=latent_params,
+                #         aff_def_params=None,
+                #         return_deriv=False,
+                #         return_def=True,
+                #         inference=True)
+                # pred_img_no_def = pred_vals_no_def_.detach().reshape(H, W)
+                # pred_img_no_def_diff = (pred_img_no_def - pred_img).abs()
+                # pred_img_no_def_diff = torch.stack([pred_img_no_def_diff.abs()] * 3, dim=0)
 
                 # Registration
-                source_values_pred_, source_seg_pred_, target_values_pred_, target_seg_pred_, target_coords_ \
-                    = self.forward_registration(world_coords_, latent_params, pred_deform_)
-                deformed_coords_image_space_ = self.forward_coord_model(target_coords_, aff_params_padded,
-                                                                  spacings_padded, flippings_padded,
-                                                                  slice_idx_,
-                                                                  coord_min, coord_max,
-                                                                  aff_def_params=aff_def_params,
-                                                                  inverse=True)
-                deform_pred_image_space_ = deformed_coords_image_space_ - voxel_indices_
-                deform_pred_image_space = deform_pred_image_space_.reshape(*pred_img.shape, 4)
-                quiver_image = draw_3d_vectors_on_image(images[0, s].cpu().numpy(),
-                                                        deform_pred_image_space[..., :3].cpu().numpy())
-                quiver_image = torch.tensor(quiver_image, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
-                target_values_pred = target_values_pred_.reshape(pred_img.shape)
-                source_values_pred = source_values_pred_.reshape(pred_img.shape)
-                quiver_image_pred = draw_3d_vectors_on_image(source_values_pred.cpu().numpy(),
-                                                        deform_pred_image_space[..., :3].cpu().numpy())
-                quiver_image_pred = torch.tensor(quiver_image_pred, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
-                regist_values_diff = (target_values_pred - source_values_pred).abs()
-                regist_values_diff = torch.stack([regist_values_diff]*3, dim=0)
-                target_seg_pred_argmax = target_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
-                source_seg_pred_argmax = source_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
-                regist_seg_diff = (target_seg_pred_argmax != source_seg_pred_argmax)
-                regist_seg_diff = torch.stack([regist_seg_diff]*3, dim=0)
-                target_values_pred = torch.stack([target_values_pred]*3, dim=0).to(torch.float32)
+                # source_values_pred_, source_seg_pred_, target_values_pred_, target_seg_pred_, target_coords_ \
+                #     = self.forward_registration(world_coords_, latent_params, pred_deform_)
+                # deformed_coords_image_space_ = self.forward_coord_model(target_coords_, aff_params_padded,
+                #                                                   spacings_padded, flippings_padded,
+                #                                                   slice_idx_,
+                #                                                   coord_min, coord_max,
+                #                                                   aff_def_params=aff_def_params,
+                #                                                   inverse=True)
+                # deform_pred_image_space_ = deformed_coords_image_space_ - voxel_indices_
+                # deform_pred_image_space = deform_pred_image_space_.reshape(*pred_img.shape, 4)
+                # quiver_image = draw_3d_vectors_on_image(images[0, s].cpu().numpy(),
+                #                                         deform_pred_image_space[..., :3].cpu().numpy())
+                # quiver_image = torch.tensor(quiver_image, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
+                # target_values_pred = target_values_pred_.reshape(pred_img.shape)
+                # source_values_pred = source_values_pred_.reshape(pred_img.shape)
+                # quiver_image_pred = draw_3d_vectors_on_image(source_values_pred.cpu().numpy(),
+                #                                         deform_pred_image_space[..., :3].cpu().numpy())
+                # quiver_image_pred = torch.tensor(quiver_image_pred, dtype=torch.float32, device=pred_img.device).moveaxis(-1, 0) / 255.
+                # regist_values_diff = (target_values_pred - source_values_pred).abs()
+                # regist_values_diff = torch.stack([regist_values_diff]*3, dim=0)
+                # target_seg_pred_argmax = target_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
+                # source_seg_pred_argmax = source_seg_pred_.reshape(*pred_img.shape, -1).argmax(-1)
+                # regist_seg_diff = (target_seg_pred_argmax != source_seg_pred_argmax)
+                # regist_seg_diff = torch.stack([regist_seg_diff]*3, dim=0)
+                # target_values_pred = torch.stack([target_values_pred]*3, dim=0).to(torch.float32)
+                # images_ed = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))[0]
+                # target_seg_frames = torch.stack([images_ed[s]]*3, 0).to(target_seg_pred_argmax.device)
+                # target_seg_mask = torch.stack([target_seg_pred_argmax == 1] * 3, dim=0)
+                # red = torch.tensor((1.0, 0.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                # green = torch.tensor((0.0, 1.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                # blue = torch.tensor((0.0, 1.0, 1.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
+                # target_seg_frames = torch.where(target_seg_mask, red, target_seg_frames)
+                # target_seg_mask = torch.stack([target_seg_pred_argmax == 2] * 3, dim=0)
+                # target_seg_frames = torch.where(target_seg_mask, green, target_seg_frames)
+                # target_seg_mask = torch.stack([target_seg_pred_argmax == 3] * 3, dim=0)
+                # target_seg_frames = torch.where(target_seg_mask, blue, target_seg_frames)
+
                 pred_img_diff = torch.stack([pred_img_diff]*3, dim=0).to(torch.float32)
                 pred_seg_diff = torch.stack([pred_seg_diff]*3, dim=0).to(torch.float32)
-                images_ed = self.get_sample_elements_from_batch(dataset.load_subject_data(subj_idx, 0))[0]
-                target_seg_frames = torch.stack([images_ed[s]]*3, 0).to(target_seg_pred_argmax.device)
-                target_seg_mask = torch.stack([target_seg_pred_argmax == 1] * 3, dim=0)
-                red = torch.tensor((1.0, 0.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
-                green = torch.tensor((0.0, 1.0, 0.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
-                blue = torch.tensor((0.0, 1.0, 1.0), device=target_seg_frames.device).reshape((3, 1, 1)).tile((1, *target_seg_frames.shape[-2:]))
-                target_seg_frames = torch.where(target_seg_mask, red, target_seg_frames)
-                target_seg_mask = torch.stack([target_seg_pred_argmax == 2] * 3, dim=0)
-                target_seg_frames = torch.where(target_seg_mask, green, target_seg_frames)
-                target_seg_mask = torch.stack([target_seg_pred_argmax == 3] * 3, dim=0)
-                target_seg_frames = torch.where(target_seg_mask, blue, target_seg_frames)
 
                 col_img = torch.cat([img, seg_frames], dim=1)
                 col_d = torch.cat([images_dt_norm_abs, pred_img_dt, pred_img_diff, pred_seg_diff], dim=1)
-                col_regist = torch.cat([target_values_pred, quiver_image, target_seg_frames, regist_seg_diff], dim=1)
-                col_regist2 = torch.cat([regist_values_diff, quiver_image_pred, pred_img_int_scale_undo, pred_img_no_def_diff], dim=1)
-                frame = torch.cat([col_img, col_d, col_regist, col_regist2], dim=2)
+                # col_regist = torch.cat([target_values_pred, quiver_image, target_seg_frames, regist_seg_diff], dim=1)
+                # col_regist2 = torch.cat([regist_values_diff, quiver_image_pred, pred_img_int_scale_undo, pred_img_no_def_diff], dim=1)
+                # frame = torch.cat([col_img, col_d, col_regist, col_regist2], dim=2)
+                frame = torch.cat([col_img, col_d], dim=2)
                 frame = frame.clip(0.0, 1.0)
                 frame = (frame * 255).cpu().numpy().astype(np.uint8)
                 videos[s].append(frame)
@@ -969,6 +1058,7 @@ class INR_AutoReg(pl.LightningModule):
                    latent_params: torch.Tensor,
                    aff_def_params: torch.Tensor,
                    video_duration: float = 4,
+                   tds: int = 2,
                    mode="train",
                    res=(300, 300, 300)):
         res_tensor = torch.tensor(res, dtype=torch.float32)
@@ -977,49 +1067,48 @@ class INR_AutoReg(pl.LightningModule):
         coords = torch.stack(torch.meshgrid(*[torch.linspace(self.norm_min, self.norm_max, i) for i in res]), dim=-1)
         ims = []
         segs = []
-        defs = []
-        def_quivers = []
-        tds = 5
+        # defs = []
+        # def_quivers = []
         for t in tqdm.tqdm(range(0, 50, tds), desc=f"Logging {mode} volume for subject {subj_idx} (UKBB id: {subj_id})"):
             t_norm = t / 50
             c = torch.concatenate((coords, torch.full((*res, 1), t_norm)), dim=-1).cuda()
             z_im_slices = []
             z_seg_slices = []
-            z_def_slices = []
-            z_def_quiver_slices = []
+            # z_def_slices = []
+            # z_def_quiver_slices = []
             for z in range(res[-1]):
                 c_z = c[:,:,z:z+1]
-                pred_vals_, pred_seg_, pred_def_ = self.forward_inr(c_z.reshape(1, -1, 4), latent_params, inference=True)
+                pred_vals_, pred_seg_, pred_def_ = self.forward_inr(c_z.reshape(1, -1, 4), latent_params, inference=True, return_def=False)
                 pred_seg = pred_seg_.argmax(-1).reshape(c_z.shape[:-1])
                 pred_vals_ = pred_vals_.clip(0.0, 1.0)
                 pred_val = pred_vals_.reshape(c_z.shape[:-1])
-                pred_def = pred_def_.reshape(*c_z.shape[:-1], 3)
-                pred_def_scale = pred_def * res_tensor.to(pred_def.device)/(self.norm_max - self.norm_min)
-                quiver_image = draw_3d_vectors_on_image(pred_val.cpu().numpy(),
-                                                        pred_def_scale[...,0, :].cpu().numpy(), upscale_factor=5)
-                quiver_image = np.moveaxis(quiver_image, -1, 0)[...,None]
+                # pred_def = pred_def_.reshape(*c_z.shape[:-1], 3)
+                # pred_def_scale = pred_def * res_tensor.to(pred_def.device)/(self.norm_max - self.norm_min)
+                # quiver_image = draw_3d_vectors_on_image(pred_val.cpu().numpy(),
+                #                                         pred_def_scale[...,0, :].cpu().numpy(), upscale_factor=5)
+                # quiver_image = np.moveaxis(quiver_image, -1, 0)[...,None]
                 pred_seg = pred_seg.cpu().numpy()
                 pred_seg = pred_seg.astype(np.uint8)
                 pred_val = pred_val.cpu().numpy()
                 pred_val = (pred_val*255).astype(np.uint8)
-                pred_def = pred_def.cpu().numpy()
-                pred_def = pred_def.astype(float)
+                # pred_def = pred_def.cpu().numpy()
+                # pred_def = pred_def.astype(float)
                 z_im_slices.append(pred_val)
                 z_seg_slices.append(pred_seg)
-                z_def_slices.append(pred_def)
-                z_def_quiver_slices.append(quiver_image)
+                # z_def_slices.append(pred_def)
+                # z_def_quiver_slices.append(quiver_image)
             pred_im_t = np.concatenate(z_im_slices, -1)
             pred_seg_t = np.concatenate(z_seg_slices, -1)
-            pred_def_t = np.concatenate(z_def_slices, -2)
-            pred_def_quiver_t = np.concatenate(z_def_quiver_slices, -1)
+            # pred_def_t = np.concatenate(z_def_slices, -2)
+            # pred_def_quiver_t = np.concatenate(z_def_quiver_slices, -1)
             ims.append(pred_im_t)
             segs.append(pred_seg_t)
-            defs.append(pred_def_t)
-            def_quivers.append(pred_def_quiver_t)
+            # defs.append(pred_def_t)
+            # def_quivers.append(pred_def_quiver_t)
         ims = np.stack(ims, -1)
         segs = np.stack(segs, -1)
-        defs = np.stack(defs, -1)
-        def_quivers = np.stack(def_quivers, -1)
+        # defs = np.stack(defs, -1)
+        # def_quivers = np.stack(def_quivers, -1)
 
         if self.logging_disabled:  # Logging  -------------------------------------------------------------------------
             return
@@ -1068,13 +1157,14 @@ class INR_AutoReg(pl.LightningModule):
         slice_indices = range(20, res[2] - 20, res[2] // 10)
         ims_rgb = np.stack([ims]*3, axis=0)
         segs_rgb = (np.stack([segs]*3, axis=0) / 4 * 255).astype(np.uint8)
-        content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :], def_quivers[...,i, :]), 2) for i in slice_indices]
+        content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :]), 2) for i in slice_indices]
+        # content = [np.concatenate((ims_rgb[..., i, :], segs_rgb[..., i, :], def_quivers[...,i, :]), 2) for i in slice_indices]
         content = [np.moveaxis(c, -1, 0) for c in content]
         # Save series to file as mp4
         save_dir_gt = save_dir / "mp4"
         save_dir_gt.mkdir(exist_ok=True)
         for v, i in zip(content, slice_indices):
-            video_array_to_file(v, save_dir / f"slice_{i:03d}-{res[2]}.mp4", video_duration=2.0)
+            video_array_to_file(v, save_dir / f"slice_{i:03d}-{res[2]}.mp4", video_duration=video_duration)
         # Log to WANDB
         if not self.logging_wandb_disabled:
             # Log video slices
