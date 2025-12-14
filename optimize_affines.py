@@ -13,9 +13,9 @@ import matplotlib.pyplot as plt
 
 from geo_utils import get_image_plane_from_array, plane_intersection, closest_point_on_line, batch_normalize_vector
 from utils import normalize_image, normalize_image_with_mean_lv_value, fast_trilinear_interpolation, mat_to_params, \
-    params_to_mat
+    params_to_mat, fast_nearest_neighbor_interpolation
 from data_utils import SubjectFiles, find_subjects
-from metrics import L2, L1
+from metrics import L2, L1, NCC, Dice
 
 DEVICE = "cuda"
 
@@ -407,9 +407,11 @@ def find_sampling_center(image_centers1, image_centers2, intersec_lines) -> torc
     return sampling_centers
 
 
-def compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_step_mm=5.0, num_samples=100) -> torch.Tensor:
+def compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_step_mm=None, num_samples=100) -> torch.Tensor:
     """ Compute a sampling line of num_samples points along the intersection lane between all plane pairs.
      Each line is centered on the average image centers. Each point is spaced sampling_step_mm appart. """
+    if sampling_step_mm is None:
+        sampling_step_mm = 5.0
     planes = get_image_plane_from_array(affines)
     planes1, planes2 = planes[pair_indices[:, 0]], planes[pair_indices[:, 1]]
     # We assume the plane pairs always intersect
@@ -426,6 +428,7 @@ def compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_s
     dists_from_centers = (torch.arange(0, num_samples, dtype=affines.dtype, device=affines.device) - num_samples / 2)
     dists_from_centers *= sampling_step_mm
     dists_from_centers_ = dists_from_centers[None, :, None].tile((sampling_centers.shape[0], 1, 3))
+    sampling_centers_ = sampling_centers[:, None].tile((1, num_samples, 1))
     sample_lines = sampling_centers_ + step_vectors_ * dists_from_centers_
 
     assert sample_lines.shape[0] == pair_indices.shape[0]
@@ -435,7 +438,7 @@ def compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_s
 
 
 def sample_image_along_scanner_line(coords_scanner_space: torch.Tensor, images: torch.Tensor,
-                                    affines: torch.Tensor, shapes: torch.Tensor) \
+                                    affines: torch.Tensor, shapes: torch.Tensor, interp_type='linear') \
         -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     dtype = coords_scanner_space.dtype
     device = coords_scanner_space.device
@@ -457,11 +460,21 @@ def sample_image_along_scanner_line(coords_scanner_space: torch.Tensor, images: 
     # Concatenate time indices to xy coordinates
     coords_voxel_space_t = coords_voxel_space[:, :, None].tile((1, 1, images.shape[-1], 1))
     coords_voxel_space_t = torch.cat((coords_voxel_space_t, t[..., None]), dim=-1)
-    # Treat 2D+time images are volumes and use trilinear interpolation to extract values at each time point
-    sampled_points = fast_trilinear_interpolation(images,
-                                                  coords_voxel_space_t[..., 0].reshape((images.shape[0], -1)),
-                                                  coords_voxel_space_t[..., 1].reshape((images.shape[0], -1)),
-                                                  coords_voxel_space_t[..., 2].reshape((images.shape[0], -1)))
+    if interp_type == 'linear':
+        # Treat 2D+time images are volumes and use trilinear interpolation to extract values at each time point
+        sampled_points = fast_trilinear_interpolation(images,
+                                                      coords_voxel_space_t[..., 0].reshape((images.shape[0], -1)),
+                                                      coords_voxel_space_t[..., 1].reshape((images.shape[0], -1)),
+                                                      coords_voxel_space_t[..., 2].reshape((images.shape[0], -1)))
+    elif interp_type == 'nn':
+        # Not differentiable!!
+        sampled_points = fast_nearest_neighbor_interpolation(images,
+                                                             coords_voxel_space_t[..., 0].reshape((images.shape[0], -1)),
+                                                             coords_voxel_space_t[..., 1].reshape((images.shape[0], -1)),
+                                                             coords_voxel_space_t[..., 2].reshape((images.shape[0], -1)))
+    else:
+        raise ValueError(f'Interpolation type "{interp_type}" not implemented')
+
     sampled_points = sampled_points.reshape((images.shape[0], coords_scanner_space.shape[1], images.shape[-1]))
     # Create mask to deliniate which sampled points were inside/outside image.
     shapes_ = shapes[:, None, :2].tile((1, coords_voxel_space.shape[1], 1))
@@ -472,14 +485,26 @@ def sample_image_along_scanner_line(coords_scanner_space: torch.Tensor, images: 
     return sampled_points, in_mask, coords_voxel_space
 
 
-def compute_pairwise_loss(images, affines, pair_indices, shapes) -> torch.Tensor:
-    metric = L1()
-    sample_coords_scanner_space = compute_intersection_sampling_line(affines, pair_indices, shapes)
+def compute_pairwise_loss(images, affines, pair_indices, shapes, metric='ncc', interp_type='linear', sampling_step_mm=None) -> torch.Tensor:
+    if metric == 'l1':
+        metric = L1()
+    elif metric == 'l2':
+        metric = L2()
+    elif metric == 'ncc':
+        metric = NCC()
+    elif metric == 'dice':
+        metric = Dice()
+    else:
+        raise ValueError(f'Metric name "{metric}" not implemented')
+
+    sample_coords_scanner_space = compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_step_mm=sampling_step_mm)
     images1, images2 = images[pair_indices[:, 0]], images[pair_indices[:, 1]]
     affines1, affines2 = affines[pair_indices[:, 0]], affines[pair_indices[:, 1]]
     shapes1, shapes2 = shapes[pair_indices[:, 0]], shapes[pair_indices[:, 1]]
-    sampled_im1, sample_mask1, line_im1 = sample_image_along_scanner_line(sample_coords_scanner_space, images1, affines1, shapes1)
-    sampled_im2, sample_mask2, line_im2 = sample_image_along_scanner_line(sample_coords_scanner_space, images2, affines2, shapes2)
+    sampled_im1, sample_mask1, line_im1 = sample_image_along_scanner_line(sample_coords_scanner_space, images1,
+                                                                          affines1, shapes1, interp_type=interp_type)
+    sampled_im2, sample_mask2, line_im2 = sample_image_along_scanner_line(sample_coords_scanner_space, images2,
+                                                                          affines2, shapes2, interp_type=interp_type)
     loss = metric(sampled_im1, sampled_im2, mask1=sample_mask1, mask2=sample_mask2)
     return loss
 

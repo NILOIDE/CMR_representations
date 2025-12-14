@@ -6,7 +6,7 @@ import numpy as np
 import skimage
 import torch
 import torch.nn.functional as F
-import meshplot as mp
+# import meshplot as mp
 import matplotlib
 matplotlib.use('Agg')  # Set non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
@@ -102,6 +102,42 @@ def fast_trilinear_interpolation(input_array: torch.Tensor,
         input_array[b_, x1_, y1_, z1_] * x_ * y_ * z_
     )
     output = output_.reshape(x0.shape)
+    return output
+
+
+def fast_nearest_neighbor_interpolation(input_array: torch.Tensor,
+                                        y_indices: torch.Tensor,
+                                        x_indices: torch.Tensor,
+                                        z_indices: torch.Tensor) -> torch.Tensor:
+    """ Nearest neighbor interpolation of a batch of 3D volumes.
+     :param input_array: Images used as source for the sampling.                Shape: (batch, height, width, depth)
+     :param y_indices: Indices of the 1st spatial dimension of a given image.   Shape: (batch, num_points)
+     :param x_indices: Input image of shape (batch, height, width, depth)       Shape: (batch, num_points)
+     :param z_indices: Input image of shape (batch, height, width, depth)       Shape: (batch, num_points)
+     """
+    # Round to nearest integer instead of floor
+    x_nearest = torch.round(y_indices).to(torch.long)
+    y_nearest = torch.round(x_indices).to(torch.long)
+    z_nearest = torch.round(z_indices).to(torch.long)
+
+    # Clamp to valid range
+    x_nearest = torch.clamp(x_nearest, 0, input_array.shape[1] - 1)
+    y_nearest = torch.clamp(y_nearest, 0, input_array.shape[2] - 1)
+    z_nearest = torch.clamp(z_nearest, 0, input_array.shape[3] - 1)
+
+    # Create batch indices
+    b, _ = torch.meshgrid(torch.arange(0, x_nearest.shape[0], device=x_nearest.device),
+                          torch.arange(0, x_nearest.shape[1], device=x_nearest.device),
+                          indexing='ij')
+    b_ = b.reshape(-1)
+    x_ = x_nearest.reshape(-1)
+    y_ = y_nearest.reshape(-1)
+    z_ = z_nearest.reshape(-1)
+
+    # Simple indexing - no interpolation weights needed
+    output_ = input_array[b_, x_, y_, z_]
+    output = output_.reshape(x_nearest.shape)
+
     return output
 
 
