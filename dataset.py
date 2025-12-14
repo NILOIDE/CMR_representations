@@ -137,6 +137,7 @@ class CardiacUKBBValidation(CardiacUKBB):
                 # image_ddt = torch.tensor(f['image_dd_padded'][selected_frame, 5:6], dtype=torch.float32).moveaxis(0, -1)
                 # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
                 self.image_mask[i, :S, :H, :W, :T] = torch.tensor(f['image_padded_mask'][:], dtype=torch.bool).moveaxis(0, -1)
+                # self.image_mask[i, 3:] = False
                 self.seg[i, :S, :H, :W, :T] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8).moveaxis(0, -1)
                 self.gt_available[i, :S, :H, :W, :T] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool).moveaxis(0, -1)
                 self.image_pad = self.image_pad[:,:,:H,:W]

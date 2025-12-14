@@ -529,9 +529,10 @@ class INR_AutoReg(pl.LightningModule):
                 or self.current_epoch in self.addit_log_epochs):
             self.do_logging()
 
-    def do_logging(self):
+    def do_logging(self, dset=None):
         dset_str = 'train'
-        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        if dset is None:
+            dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         # for i in range(0, min(len(dset), 8)):
         for i in range(0, 8):
             batch = tuple(b[None].cuda() for b in dset[i])
@@ -582,7 +583,12 @@ class INR_AutoReg(pl.LightningModule):
     def do_testing(self, dset=None, dset_str = 'test'):
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        annotated_subj_ids = [1009169, 1011525, 1012959, 1021869, 1026284, 1037010, 1037287, 1037527, 1043831, 1050481,
+                           1053004, 1059837, 1060134, 1060474,1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
+        annotated_subj_ids = [str(i) for i in annotated_subj_ids]
         for i in range(0, len(dset)):
+            # if Path(dset.data_paths[i]).parent.name not in annotated_subj_ids[:10]:
+            #     continue
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
             # Optimizers (None if we do not want to optimize)
             opt_latent = torch.optim.Adam([latent_params], lr=self.inf_lr_latent)
@@ -613,8 +619,8 @@ class INR_AutoReg(pl.LightningModule):
                                  )
             starting_inr_weights = self.canonical_inr.state_dict()
             curr_step = self.inf_max_epochs
-            for s in [0, 500, 1000, 2500, 5000]:
-                dset_str_ft = dset_str + f"_ft{s:04d}"
+            for s in [100, 250, 500, 1000, 2500, 5000]:
+                dset_str_ft = dset_str + f"_opt{self.inf_max_epochs:04d}_ft{s:04d}"
                 if s > 0:
                     (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
                      opt_latent, opt_affine_def, opt_intensity_def, opt_inr) \
@@ -637,18 +643,18 @@ class INR_AutoReg(pl.LightningModule):
                                          weight_loss_seg=self.inf_weight_loss_seg,
                                          weight_loss_deriv=self.weight_loss_deriv,
                                          optimize_latent_params=True,
-                                         optimize_aff_def_params=False,
-                                         optimize_intens_scale_params=False,
+                                         optimize_aff_def_params=True,
+                                         optimize_intens_scale_params=True,
                                          optimize_decoder=True,
                     )
+                    self.log_volume(i, dset, mode=dset_str_ft,
+                                             latent_params=optimized_latent,
+                                             aff_def_params=optimized_affine_def)
                 curr_step = self.inf_max_epochs + s
                 self.log_images(i, dset, mode=dset_str_ft,
                                          latent_params=optimized_latent,
                                          aff_def_params=optimized_affine_def,
                                          intens_scale_params=optimized_intensity_def,)
-                self.log_volume(i, dset, mode=dset_str_ft,
-                                         latent_params=optimized_latent,
-                                         aff_def_params=optimized_affine_def)
             self.canonical_inr.load_state_dict(starting_inr_weights)
 
     def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
@@ -745,9 +751,11 @@ class INR_AutoReg(pl.LightningModule):
             # Recon loss
             loss_recon = self.psnr_loss(values_pred, values_deform)
             # Segmentation metrics
-            seg_pred, segs = seg_pred * gt_avail[..., None], seg_gt * gt_avail[..., None]
-            loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1, 1), segs.moveaxis(-1, 1)).mean(-1).mean(0)
-            dice_per_class = 1 - loss_seg_per_class
+            # seg_pred, segs = seg_pred * gt_avail[..., None], seg_gt * gt_avail[..., None]
+            seg_pred[~gt_avail] = torch.tensor((1., 0., 0., 0.), device=seg_pred.device)
+            seg_gt[~gt_avail] = torch.tensor((1., 0., 0., 0.), device=seg_pred.device)
+            loss_seg_per_class = self.seg_loss(seg_pred.moveaxis(-1, 1), seg_gt.moveaxis(-1, 1)).mean(-1).mean(0)
+            dice_per_class = 1 - loss_seg_per_class # TODO: doesn't properly handle gt_not_available
             # Seg loss is only supervised if user explicitly wants to
             loss_seg = torch.tensor((0.0,), device=loss_recon.device)
             if supervise_seg:
@@ -841,10 +849,12 @@ class INR_AutoReg(pl.LightningModule):
                    aff_def_params: torch.Tensor,
                    intens_scale_params: torch.Tensor,
                    video_duration: float = 4,
+                   with_psf: bool = False,
                    mode="train"):
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
         gt_ims = [[] for _ in range(20)]
+        gt_segs = [[] for _ in range(20)]
         videos = [[] for _ in range(20)]
         preds = [[] for _ in range(20)]
         segs = [[] for _ in range(20)]
@@ -867,25 +877,31 @@ class INR_AutoReg(pl.LightningModule):
                                        torch.full_like(full_indices[..., :1], t)), dim=-1).float()
             for s in range(num_subj_slices.item()):
                 gt_ims[s].append((images[0,s] * 255).cpu().numpy().astype(np.uint8))
+                gt_segs[s].append((seg_argmax[0,s]).cpu().numpy().astype(np.uint8))
                 voxel_indices_ = voxel_indices[s, ..., :].reshape(1, -1, 4)
                 slice_idx_ = slice_idx[s, ..., :].reshape(1, -1, 1)
                 with torch.enable_grad():
-                    pred_vals_, pred_seg_, pred_deform_, pred_vals_d_, world_coords_ = self.forward(
+                    pred_vals_, pred_seg_, pred_deform_, pred_vals_d_, world_coords_ = self.forward_with_point_spread(
                         voxel_indices_, aff_params_padded,
                         spacings_padded, flippings_padded,
                         slice_idx_,
                         coord_min, coord_max,
                         latent_params=latent_params,
                         aff_def_params=aff_def_params,
+                        point_spread_size=self.point_spread_size_after if with_psf else 1,
+                        point_spread_std=self.point_spread_std_after if with_psf else self.point_spread_std_before,
                         return_deriv=True, return_def=True, inference=True)
                 pred_seg_, pred_vals_, pred_deform_, pred_vals_d_ \
                     = pred_seg_.detach(), pred_vals_.detach(), pred_deform_.detach(), pred_vals_d_.detach()
 
+                image_scaled = self.apply_intensity_scaling(images[0, s].reshape(1, -1), images[0, s].reshape(1, -1),
+                                                      slice_idx_, intens_scale_params).reshape(H, W)
+
                 pred_img = pred_vals_.reshape(H, W)
-                psnr_metric = kornia.metrics.psnr(pred_img, images[0,s,...], max_val=1.0)
+                psnr_metric = kornia.metrics.psnr(pred_img, image_scaled, max_val=1.0)
                 pred_img_diff = (pred_img - images[0, s]).abs()
                 psnrs[s].append(psnr_metric.mean().detach().cpu().item())
-                ssim_metric = kornia.metrics.ssim(pred_img[None, None], images[:,s,None,...], window_size=11, max_val=1.0)
+                ssim_metric = kornia.metrics.ssim(pred_img[None, None], image_scaled[None,None], window_size=11, max_val=1.0)
                 ssims[s].append(ssim_metric.mean().detach().cpu().item())
                 pred = pred_img.clip(0.0, 1.0)
                 pred = (pred * 255).cpu().numpy().astype(np.uint8)
@@ -897,7 +913,8 @@ class INR_AutoReg(pl.LightningModule):
                 seg_gt = to_1hot(seg_argmax[0,s].reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 pred_seg_1hot = to_1hot(pred_seg_argmax.reshape(-1), pred_seg.shape[-1]).reshape(pred_seg.shape)
                 dice = 1 - self.seg_loss(pred_seg_1hot[None].moveaxis(-1,1), seg_gt[None].moveaxis(-1,1)).mean(0).squeeze()
-                dices[s].append(dice.detach().cpu())
+                if s >= 3 or (t in {0,16,32} and seg_gt[...,1].any().item()):
+                    dices[s].append(dice.detach().cpu())
                 pred_def = pred_deform_.reshape(H, W, 3)
                 defs[s].append(pred_def.cpu().numpy().astype(float))
 
@@ -1000,19 +1017,19 @@ class INR_AutoReg(pl.LightningModule):
         # Save metrics to file
         psnrs = [np.mean(i) for i in psnrs if i]
         ssims = [np.mean(i) for i in ssims if i]
-        dices = [torch.stack(d, 0).mean(0) for i, d in enumerate(dices) if d]
+        dices = [torch.stack(d, 0).mean(0) if d else torch.tensor([-1.]*4) for i, d in enumerate(dices) if i <= 2 or d]
         metrics = {"PSNR": psnrs, "SSIM": ssims,
                    "Dice_BG": [i[0].item() for i in dices],
                    "Dice_LV": [i[1].item() for i in dices],
                    "Dice_MYO": [i[2].item() for i in dices],
                    "Dice_RV": [i[3].item() for i in dices],
                    }
-        pd.DataFrame(metrics).to_csv(str(self.log_path / f"epoch_{self.current_epoch:06d}_subj_{subj_idx}.csv"), index=False)
+        pd.DataFrame(metrics).to_csv(str(save_dir / f"inplane_metrics.csv"), index=False)
         # Save to WANDB
         if not self.logging_wandb_disabled:
             psnr_strings = [f"PSNR:{i:.1f}" for i in psnrs]
             dices_strings = [f"Dice:" + f"{d[1].item():.2f}, " + f"{d[2].item():.2f}, " + f"{d[3].item():.2f}"
-                             if i >= 3 else "Dice: -, -, -" for i, d in enumerate(dices)]
+                             if i >= 3 or d[1] >= 0. else "Dice: -, -, -" for i, d in enumerate(dices)]
             wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)), format='gif',
                                         caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
             wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos})
@@ -1035,21 +1052,28 @@ class INR_AutoReg(pl.LightningModule):
         segs = [np.stack(v, 0) for v in segs if v]
         defs = [np.stack(v, 0) for v in defs if v]
         gt_ims = [np.stack(v, 0) for v in gt_ims if v]
-        for i, (gt, v, s, d) in enumerate(zip(gt_ims, preds, segs, defs)):
-            aff_params = aff_params_padded[i][None] + aff_def_params[0, i].cpu()
-            aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
-            aff = aff[0].cpu().numpy()
+        gt_segs = [np.stack(v, 0) for v in gt_segs if v]
+        for i, (gt_im, gt_seg, v, s, d) in enumerate(zip(gt_ims, gt_segs, preds, segs, defs)):
+            aff_params_def = aff_params_padded[i][None] + aff_def_params[0, i].cpu()
+            aff_def = params_to_mat(aff_params_def, spacings_padded[i][None], flippings_padded[i][None])
+            aff_def = aff_def[0].cpu().numpy()
             v = v.astype(np.int32)
             v = np.moveaxis(v[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v, aff)
+            array_to_nifti(str(save_dir_nif / f"slice_{i:02d}.nii.gz"), v, aff_def)
             s = s.astype(np.int32)
             s = np.moveaxis(s[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s, aff)
+            array_to_nifti(str(save_dir_nif / f"seg_slice_{i:02d}.nii.gz"), s, aff_def)
             # d = np.moveaxis(d[..., None], 0, -1)
             # array_to_nifti(str(save_dir_nif / f"def_slice_{i:02d}.nii.gz"), d, aff)
-            gt = gt.astype(np.int32)
-            gt = np.moveaxis(gt[..., None], 0, -1)
-            array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt, aff)
+            aff_params = aff_params_padded[i][None]
+            aff = params_to_mat(aff_params, spacings_padded[i][None], flippings_padded[i][None])
+            aff = aff[0].cpu().numpy()
+            gt_im = gt_im.astype(np.int32)
+            gt_im = np.moveaxis(gt_im[..., None], 0, -1)
+            array_to_nifti(str(save_dir_nif_og / f"slice_{i:02d}.nii.gz"), gt_im, aff)
+            gt_seg = gt_seg.astype(np.int32)
+            gt_seg = np.moveaxis(gt_seg[..., None], 0, -1)
+            array_to_nifti(str(save_dir_nif_og / f"seg_slice_{i:02d}.nii.gz"), gt_seg, aff)
 
     @torch.no_grad()
     def log_volume(self,
@@ -1058,7 +1082,7 @@ class INR_AutoReg(pl.LightningModule):
                    latent_params: torch.Tensor,
                    aff_def_params: torch.Tensor,
                    video_duration: float = 4,
-                   tds: int = 2,
+                   tds: int = 1,
                    mode="train",
                    res=(300, 300, 300)):
         res_tensor = torch.tensor(res, dtype=torch.float32)
