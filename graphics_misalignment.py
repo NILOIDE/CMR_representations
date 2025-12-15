@@ -1,6 +1,8 @@
 import copy
+from collections import defaultdict
 from itertools import combinations, product
 
+import imageio
 import pyvista as pv
 import time
 
@@ -24,17 +26,16 @@ from optimize_affines import compute_pairwise_loss
 from sa_la_interp import interpolate_seg_to_other_view
 from utils import params_to_mat
 
+
+REPLACE_SLICE_SEG_IMAGES = True
+REPLACE_SLICE_SEG_VIDEOS = False
+
 # Rendering parameters --------------------------------------------------
 colors_vol = {
     1: "rgb(150,0,0)",
     2: "rgb(0,150,0)",
     3: "rgb(200, 200, 0)",
 }
-# colors_slice = {
-#     1: "rgb(150,50,100)",
-#     2: "rgb(40,100,125)",
-#     3: "rgb(150,80,8)",
-# }
 colors_slice = {
     1: "rgb(150,0,0)",
     2: "rgb(0,150,0)",
@@ -61,7 +62,6 @@ def create_slice_mesh(seg_path, aff, coord_max, coord_min):
     seg_file = nib.load(seg_path)
     H, W, D, T = seg_file.shape
     seg = seg_file.dataobj[...,int(T*FRAME)]
-
 
     labels = [3, 2, 1]
     meshes = []
@@ -154,7 +154,8 @@ def create_volume_mesh(seg_path, flip=False):
     return meshes
 
 
-def create_plot(volume_pred_path, opt_paths, affs, coords_max, coords_min):
+def plot_slices_with_transparent_vol(volume_pred_path, opt_paths, affs, coords_max, coords_min,
+                                     save_path="", visualize=True):
     fig = go.Figure()
     meshes = create_volume_mesh(str(volume_pred_path))
     for m in meshes:
@@ -164,7 +165,7 @@ def create_plot(volume_pred_path, opt_paths, affs, coords_max, coords_min):
         for o in objs:
             fig.add_trace(o)
 
-    zoom = 0.7
+    zoom = 0.4
     fig.update_layout(
         scene=dict(
             xaxis=dict(visible=False, range=[-1, 1]),
@@ -182,8 +183,11 @@ def create_plot(volume_pred_path, opt_paths, affs, coords_max, coords_min):
         margin=dict(l=0, r=0, t=0, b=0),
         scene_aspectmode='data',
     )
-
-    fig.show()
+    if save_path:
+        # Save as a standalone HTML file
+        fig.write_html(save_path, include_plotlyjs='cdn', div_id='mesh-plot')
+    if visualize:
+        fig.show()
 
 
 def get_h5_affs(h5_path):
@@ -455,22 +459,69 @@ def overlay_contours_on_image(intensity_slice, seg_slice, color_map=None,
 
     return rgb_image
 
-def inter_vol_to_slices(vol_path, affs, seg_paths, im_paths):
+
+def inter_vol_to_slices(vol_path, affs, seg_paths, im_paths, frame_idx=0):
+    *_, T_slice = nib.load(str(im_paths[0])).shape
     vol_seg = nib.load(str(vol_path))
-    vold_seg = vol_seg.dataobj[..., int(vol_seg.shape[-1] * FRAME)]
+    *_, T_vol = vol_seg.shape
+    assert T_slice == T_vol
+    vold_seg = vol_seg.dataobj[..., frame_idx]
     interps = []
     for i, (s, im) in enumerate(zip(seg_paths, im_paths)):
         slice_seg = nib.load(str(s))
-        slice_seg = slice_seg.dataobj[..., int(slice_seg.shape[-1] * FRAME)].astype(np.uint8)
+        slice_seg = slice_seg.dataobj[..., frame_idx].astype(np.uint8)
         filled_slice = project_slice_with_interpolation(vold_seg, slice_seg, affs[i], og_max, og_min)
         filled_slice = zoom(filled_slice, (4, 4,), order=0)
         slice_int = nib.load(str(im))
-        slice_int = slice_int.dataobj[..., 0, int(slice_int.shape[-1] * FRAME)].astype(np.uint8)
+        slice_int = slice_int.dataobj[..., 0, frame_idx].astype(np.uint8)
         slice_int = zoom(slice_int, (4, 4), order=0)
         rgb_slice = overlay_contours_on_image(slice_int, filled_slice, colors_slice,
-                                              thickness=2, contour_only=True, smooth=True, smooth_sigma=1.5)
+                                              thickness=2, contour_only=True, smooth=True, smooth_sigma=4.)
         interps.append(rgb_slice)
     return interps
+
+
+def create_interp_slice_images(vol_path, affs, seg_paths, im_paths, save_dir, frame_idx=0):
+    save_paths = {i: save_dir / f'slice_{i}' / f"{frame_idx:02d}.png" for i in range(len(im_paths))}
+    if not REPLACE_SLICE_SEG_IMAGES:
+        if all([i.exists() for i in save_paths.values()]):
+            return save_paths
+    ims = inter_vol_to_slices(vol_path, affs, seg_paths, im_paths, frame_idx=frame_idx)
+    slice_im_paths = {}
+    for i, p in save_paths.items():
+        p.parent.mkdir(exist_ok=True, parents=True)
+        img = Image.fromarray(ims[int(i)])
+        img.save(str(p))
+        slice_im_paths[i] = str(p)
+    return slice_im_paths
+
+
+def create_slice_segmentation_video(vol_path, affs, seg_paths, im_paths, save_dir):
+    if not REPLACE_SLICE_SEG_VIDEOS and not REPLACE_SLICE_SEG_IMAGES:
+        if all([(save_dir / f'slice_{i:02d}.mp4').exists() for i in range(len(im_paths))]):
+            return
+    *_, T = nib.load(im_paths[0]).shape
+    frame_save_dir = save_dir / f'frames'
+    frame_paths = defaultdict(list)
+    for i in tqdm(range(0, T), desc='Processing subj in-plane segmentations'):
+        slice_paths = create_interp_slice_images(vol_path, affs, seg_paths, im_paths, frame_save_dir, frame_idx=i)
+        for slice_idx, im_path in slice_paths.items():
+            frame_paths[slice_idx].append(im_path)
+    for slice_idx, frame_paths in frame_paths.items():
+        # Video parameters
+        total_duration = 2.0  # seconds
+        fps = T / total_duration
+        with imageio.get_writer(
+                str(save_dir / f'slice_{slice_idx:02d}.mp4'),
+                fps=fps,
+                codec="libx264",
+                quality=8,  # 0–10, higher = better
+                pixelformat="yuv420p",  # required for broad browser compatibility
+        ) as writer:
+            for p in frame_paths:
+                # Convert PIL Image -> numpy array (RGB)
+                img = Image.open(str(p))
+                writer.append_data(np.asarray(img))
 
 
 def compute_intersection_metrics(image_paths, seg_paths, affs, sampling_step_mm=2.0):
@@ -504,14 +555,15 @@ def compute_intersection_metrics(image_paths, seg_paths, affs, sampling_step_mm=
     return int_metric.mean(), seg_metric[1:].mean()
 
 
-FRAME = 0.0
+FRAME = 0.2
 results_dir = Path(r"D:\logs\20251208-194802-inference_trainSet_labelOnlyModel_noFT\logs\test_opt0000_ft2500_slices")
 train_data_dir = Path(r'D:\logs\train_data')
 metrics_int_before = []
 metrics_seg_before = []
 metrics_int_after = []
 metrics_seg_after = []
-for subj in tqdm(list(results_dir.iterdir())[:], desc='Subjects'):
+for subj in tqdm(list(results_dir.iterdir())[3:4], desc='Subjects'):
+    print(subj)
     nifti_pred_dir = subj / "epoch_000000" / 'niftis'
     train_data_path = train_data_dir / subj.name / 'prep_data.h5'
     nifti_og_dir = subj / "epoch_000000" / 'niftis' / 'original'
@@ -528,29 +580,33 @@ for subj in tqdm(list(results_dir.iterdir())[:], desc='Subjects'):
     og_im_paths = sorted(og_im_paths)
     og_affs, og_max, og_min = get_h5_affs(train_data_path)
     opt_affs = [nib.load(p).affine for p in opt_seg_paths]
-    # create_plot(volume_pred_path, og_seg_paths, og_affs, og_max, og_min)
+    render_save_dir = Path('alignment') / subj.name
+    render_save_dir.mkdir(exist_ok=True, parents=True)
+    # filename = render_save_dir / f"{subj.name}_og_slices_before.html"
+    # plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
     # time.sleep(1)
-    # create_plot(volume_pred_path, og_seg_paths, opt_affs, og_max, og_min)
+    # filename = render_save_dir / f"{subj.name}_og_slices_after.html"
+    # plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    # filename = render_save_dir / f"{subj.name}_pred_slices_before.html"
+    # plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    # time.sleep(1)
+    # filename = render_save_dir / f"{subj.name}_pred_slices_after.html"
+    # plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    # print(f'Saved HTMLs to {filename.parent}')
 
-    int_metric_before, seg_metric_before = compute_intersection_metrics(og_im_paths, og_seg_paths, og_affs)
-    metrics_int_before.append(int_metric_before)
-    metrics_seg_before.append(seg_metric_before)
-    int_metric_after, seg_metric_after = compute_intersection_metrics(og_im_paths, og_seg_paths, opt_affs)
-    metrics_int_after.append(int_metric_after)
-    metrics_seg_after.append(seg_metric_after)
+    # int_metric_before, seg_metric_before = compute_intersection_metrics(og_im_paths, og_seg_paths, og_affs)
+    # metrics_int_before.append(int_metric_before)
+    # metrics_seg_before.append(seg_metric_before)
+    # int_metric_after, seg_metric_after = compute_intersection_metrics(og_im_paths, og_seg_paths, opt_affs)
+    # metrics_int_after.append(int_metric_after)
+    # metrics_seg_after.append(seg_metric_after)
 
-    # ims_before = inter_vol_to_slices(volume_pred_path, og_affs, og_seg_paths, og_im_paths)
-    # ims_after = inter_vol_to_slices(volume_pred_path, opt_affs, opt_seg_paths, og_im_paths)
-    # render_save_dir = Path('alignment') / subj.name
-    # render_save_dir.mkdir(exist_ok=True, parents=True)
-    # for i, (b, a) in enumerate(zip(ims_before, ims_after)):
-    #     # Create filename with zero-padded index
-    #     filename = render_save_dir / f"{i:02d}_before.png"
-    #     img = Image.fromarray(b)
-    #     img.save(str(filename))
-    #     filename = render_save_dir / f"{i:02d}_after.png"
-    #     img = Image.fromarray(a)
-    #     img.save(str(filename))
+    slice_save_dir = render_save_dir / 'slices'
+    slice_save_dir.mkdir(exist_ok=True, parents=True)
+    slice_save_dir_before = slice_save_dir / 'before'
+    create_slice_segmentation_video(volume_pred_path, og_affs, og_seg_paths, og_im_paths, slice_save_dir_before)
+    slice_save_dir_after = slice_save_dir / 'after'
+    create_slice_segmentation_video(volume_pred_path, og_affs, og_seg_paths, og_im_paths, slice_save_dir_after)
 print('Int metric before:', np.mean(metrics_int_before), np.std(metrics_int_before))
 print('Seg metric before:', np.mean(metrics_seg_before), np.std(metrics_seg_before))
 print('Int metric after:', np.mean(metrics_int_after), np.std(metrics_int_after))
