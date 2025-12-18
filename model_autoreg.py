@@ -533,7 +533,6 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        # for i in range(0, min(len(dset), 8)):
         for i in range(0, 8):
             batch = tuple(b[None].cuda() for b in dset[i])
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch)
@@ -583,20 +582,12 @@ class INR_AutoReg(pl.LightningModule):
     def do_testing(self, dset=None, dset_str = 'test'):
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        annotated_subj_ids = [1009169, 1011525, 1012959, 1021869, 1026284, 1037010, 1037287, 1037527, 1043831, 1050481,
-                           1053004, 1059837, 1060134, 1060474,1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
-        annotated_subj_ids = [str(i) for i in annotated_subj_ids]
         for i in range(0, len(dset)):
-            # if Path(dset.data_paths[i]).parent.name not in annotated_subj_ids[:10]:
-            #     continue
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-            # Optimizers (None if we do not want to optimize)
             opt_latent = torch.optim.Adam([latent_params], lr=self.inf_lr_latent)
             opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.inf_lr_aff)
             opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.inf_lr_def)
             opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.inf_lr_inr)
-            # latent_params, aff_def_params, intens_scale_params \
-            #     = self.subj_latents[i:i+1].cuda(), self.aff_deform_params[i:i+1].cuda(), self.intensity_scale_params[i:i+1].cuda()
             (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
              opt_latent, opt_affine_def, opt_intensity_def, opt_inr) \
                 = self.inference(i, dset,
@@ -619,7 +610,7 @@ class INR_AutoReg(pl.LightningModule):
                                  )
             starting_inr_weights = self.canonical_inr.state_dict()
             curr_step = self.inf_max_epochs
-            for s in [100, 250, 500, 1000, 2500, 5000]:
+            for s in [0,50, 100, 250, 500]:
                 dset_str_ft = dset_str + f"_opt{self.inf_max_epochs:04d}_ft{s:04d}"
                 if s > 0:
                     (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
@@ -1084,11 +1075,12 @@ class INR_AutoReg(pl.LightningModule):
                    video_duration: float = 4,
                    tds: int = 1,
                    mode="train",
-                   res=(300, 300, 300)):
+                   res=(300, 300, 300),
+                   margin=(0.15, 0.15, 0.15)):
         res_tensor = torch.tensor(res, dtype=torch.float32)
         subj_path = dataset.data_paths[subj_idx]
         subj_id = Path(subj_path).parent.name
-        coords = torch.stack(torch.meshgrid(*[torch.linspace(self.norm_min, self.norm_max, i) for i in res]), dim=-1)
+        coords = torch.stack(torch.meshgrid(*[torch.linspace(self.norm_min+margin[i], self.norm_max-margin[i], i) for i in res]), dim=-1)
         ims = []
         segs = []
         # defs = []

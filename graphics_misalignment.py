@@ -29,6 +29,7 @@ from utils import params_to_mat
 
 REPLACE_SLICE_SEG_IMAGES = True
 REPLACE_SLICE_SEG_VIDEOS = False
+REPLACE_NIFTI_SEG_VIDEOS = False
 
 # Rendering parameters --------------------------------------------------
 colors_vol = {
@@ -497,6 +498,8 @@ def create_interp_slice_images(vol_path, affs, seg_paths, im_paths, save_dir, fr
 
 
 def create_slice_segmentation_video(vol_path, affs, seg_paths, im_paths, save_dir):
+    """ Use volume seg prediction to get slice intersection. Then overlay on image.
+    ---------------- NOT VERY EFFECTIVE --------------------------"""
     if not REPLACE_SLICE_SEG_VIDEOS and not REPLACE_SLICE_SEG_IMAGES:
         if all([(save_dir / f'slice_{i:02d}.mp4').exists() for i in range(len(im_paths))]):
             return
@@ -522,6 +525,78 @@ def create_slice_segmentation_video(vol_path, affs, seg_paths, im_paths, save_di
                 # Convert PIL Image -> numpy array (RGB)
                 img = Image.open(str(p))
                 writer.append_data(np.asarray(img))
+
+
+def nifti_to_seg_video(seg_paths, im_paths, save_path, grid=(3, 4), total_duration=2.0, alpha=0.6):
+    assert len(im_paths) == len(seg_paths)
+    n_rows, n_cols = grid
+    max_tiles = n_cols * n_rows
+    num_ims = len(seg_paths)
+    sa_remainder = num_ims - max_tiles
+    seg_paths = seg_paths[:3] + seg_paths[4:][sa_remainder // 2 : sa_remainder // 2 + (max_tiles - 3)]
+    im_paths = im_paths[:3] + im_paths[4:][ sa_remainder // 2 : sa_remainder // 2 + (max_tiles - 3)]
+    assert len(im_paths) <= max_tiles, "More inputs than mosaic slots"
+    # ---- Label colors (RGB) ----
+    LABEL_COLORS = {
+        1: np.array([255,   0,   0], dtype=np.uint8),  # red
+        2: np.array([  0, 255,   0], dtype=np.uint8),  # green
+        3: np.array([255, 255,   0], dtype=np.uint8),  # yellow
+    }
+
+    # ---- Load all volumes ----
+    ims, segs = [], []
+    for im_p, seg_p in zip(im_paths, seg_paths):
+        im = np.squeeze(nib.load(im_p).get_fdata())
+        seg = np.squeeze(nib.load(seg_p).get_fdata()).astype(np.int32)
+
+        assert im.shape == seg.shape, "Image/seg shape mismatch"
+        ims.append(im)
+        segs.append(seg)
+
+    H, W, T = ims[0].shape
+    for v in ims:
+        assert v.shape == (H, W, T), "All volumes must match in shape"
+    # ---- Output canvas ----
+    mosaic_h = n_rows * H
+    mosaic_w = n_cols * W
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with imageio.get_writer(
+        str(save_path),
+        fps=T / total_duration,
+        codec="libx264",
+        quality=8,
+        pixelformat="yuv420p",
+    ) as writer:
+
+        for t in range(T):
+            canvas = np.zeros((mosaic_h, mosaic_w, 3), dtype=np.uint8)
+
+            for idx, (im, seg) in enumerate(zip(ims, segs)):
+                # ---- COLUMN-MAJOR FILL (top-down, then left-right) ----
+                c = idx // n_rows
+                r = idx % n_rows
+                y0, y1 = r * H, (r + 1) * H
+                x0, x1 = c * W, (c + 1) * W
+                frame = im[..., t]
+                mask = seg[..., t]
+                frame = np.clip(frame, 0, 255).astype(np.uint8)
+                frame_rgb = np.stack([frame] * 3, axis=-1)
+
+                overlay = frame_rgb.copy()
+                for label, color in LABEL_COLORS.items():
+                    label_mask = mask == label
+                    if not np.any(label_mask):
+                        continue
+                    overlay[label_mask] = (
+                        (1 - alpha) * frame_rgb[label_mask]
+                        + alpha * color
+                    ).astype(np.uint8)
+                canvas[y0:y1, x0:x1] = overlay
+            writer.append_data(canvas)
+    print(f"Saved mosaic video → {save_path}")
+
 
 
 def compute_intersection_metrics(image_paths, seg_paths, affs, sampling_step_mm=2.0):
@@ -555,20 +630,21 @@ def compute_intersection_metrics(image_paths, seg_paths, affs, sampling_step_mm=
     return int_metric.mean(), seg_metric[1:].mean()
 
 
-FRAME = 0.2
-results_dir = Path(r"D:\logs\20251208-194802-inference_trainSet_labelOnlyModel_noFT\logs\test_opt0000_ft2500_slices")
-train_data_dir = Path(r'D:\logs\train_data')
+FRAME = 0.0
+results_slice_dir = Path(r"/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251215-151233-inference_trainSet_visualization/logs/train_slices")
+results_vol_dir = Path(r"/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251215-151233-inference_trainSet_visualization/logs/train_volumes")
+prep_data_dir = Path(r'/home/nil/data/ukbb/cardiac/unaligned_h5_crop/')
 metrics_int_before = []
 metrics_seg_before = []
 metrics_int_after = []
 metrics_seg_after = []
-for subj in tqdm(list(results_dir.iterdir())[3:4], desc='Subjects'):
+for subj in tqdm(sorted(list(results_slice_dir.iterdir()))[:], desc='Subjects'):
     print(subj)
     nifti_pred_dir = subj / "epoch_000000" / 'niftis'
-    train_data_path = train_data_dir / subj.name / 'prep_data.h5'
+    train_data_path = prep_data_dir / subj.name / 'prep_data.h5'
     nifti_og_dir = subj / "epoch_000000" / 'niftis' / 'original'
 
-    volume_pred_path = results_dir.parent / (results_dir.name[:-6] + "volumes") / "epoch_0" / subj.name / 'pred' / 'full_seg.nii.gz'
+    volume_pred_path = results_slice_dir.parent / (results_slice_dir.name[:-6] + "volumes") / "epoch_0" / subj.name / 'pred' / 'full_seg.nii.gz'
 
     opt_seg_paths = [i for i in nifti_pred_dir.iterdir() if "seg_" in i.name]
     opt_seg_paths = sorted(opt_seg_paths)
@@ -578,35 +654,39 @@ for subj in tqdm(list(results_dir.iterdir())[3:4], desc='Subjects'):
     og_seg_paths = sorted(og_seg_paths)
     og_im_paths = [i for i in nifti_og_dir.iterdir() if "seg_" not in i.name]
     og_im_paths = sorted(og_im_paths)
-    og_affs, og_max, og_min = get_h5_affs(train_data_path)
+    _, og_max, og_min = get_h5_affs(train_data_path)
+    og_affs = [nib.load(p).affine for p in og_seg_paths]
     opt_affs = [nib.load(p).affine for p in opt_seg_paths]
-    render_save_dir = Path('alignment') / subj.name
+    render_save_dir = Path('alignment') / results_slice_dir.parent.parent.name /subj.name
     render_save_dir.mkdir(exist_ok=True, parents=True)
-    # filename = render_save_dir / f"{subj.name}_og_slices_before.html"
-    # plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
-    # time.sleep(1)
-    # filename = render_save_dir / f"{subj.name}_og_slices_after.html"
-    # plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
-    # filename = render_save_dir / f"{subj.name}_pred_slices_before.html"
-    # plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
-    # time.sleep(1)
-    # filename = render_save_dir / f"{subj.name}_pred_slices_after.html"
-    # plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
-    # print(f'Saved HTMLs to {filename.parent}')
+    filename = render_save_dir / f"{subj.name}_og_slices_before.html"
+    plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    time.sleep(1)
+    filename = render_save_dir / f"{subj.name}_og_slices_after.html"
+    plot_slices_with_transparent_vol(volume_pred_path, og_seg_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    time.sleep(1)
+    filename = render_save_dir / f"{subj.name}_pred_slices_before.html"
+    plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, og_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    time.sleep(1)
+    filename = render_save_dir / f"{subj.name}_pred_slices_after.html"
+    plot_slices_with_transparent_vol(volume_pred_path, opt_im_paths, opt_affs, og_max, og_min, save_path=str(filename), visualize=False)
+    print(f'Saved HTMLs to {filename.parent}')
 
-    # int_metric_before, seg_metric_before = compute_intersection_metrics(og_im_paths, og_seg_paths, og_affs)
-    # metrics_int_before.append(int_metric_before)
-    # metrics_seg_before.append(seg_metric_before)
-    # int_metric_after, seg_metric_after = compute_intersection_metrics(og_im_paths, og_seg_paths, opt_affs)
-    # metrics_int_after.append(int_metric_after)
-    # metrics_seg_after.append(seg_metric_after)
+    # Intersection intensity and seg metrics
+    int_metric_before, seg_metric_before = compute_intersection_metrics(og_im_paths, og_seg_paths, og_affs)
+    metrics_int_before.append(int_metric_before)
+    metrics_seg_before.append(seg_metric_before)
+    int_metric_after, seg_metric_after = compute_intersection_metrics(og_im_paths, og_seg_paths, opt_affs)
+    metrics_int_after.append(int_metric_after)
+    metrics_seg_after.append(seg_metric_after)
 
     slice_save_dir = render_save_dir / 'slices'
     slice_save_dir.mkdir(exist_ok=True, parents=True)
-    slice_save_dir_before = slice_save_dir / 'before'
-    create_slice_segmentation_video(volume_pred_path, og_affs, og_seg_paths, og_im_paths, slice_save_dir_before)
-    slice_save_dir_after = slice_save_dir / 'after'
-    create_slice_segmentation_video(volume_pred_path, og_affs, og_seg_paths, og_im_paths, slice_save_dir_after)
+    # slice_save_dir_before = slice_save_dir / 'before'
+    # create_slice_segmentation_video(volume_pred_path, og_affs, opt_seg_paths, og_im_paths, slice_save_dir_before)
+    # slice_save_dir_after = slice_save_dir / 'after'
+    # create_slice_segmentation_video(volume_pred_path, opt_affs, opt_seg_paths, og_im_paths, slice_save_dir_after)
+    nifti_to_seg_video(opt_seg_paths, og_im_paths, (slice_save_dir / 'mosaic.mp4'))
 print('Int metric before:', np.mean(metrics_int_before), np.std(metrics_int_before))
 print('Seg metric before:', np.mean(metrics_seg_before), np.std(metrics_seg_before))
 print('Int metric after:', np.mean(metrics_int_after), np.std(metrics_int_after))

@@ -30,8 +30,8 @@ class Params:
     logging_start_rate: int = 20_000
     addit_log_epochs: Tuple[int, ...] = ()
     num_train: int = 100
-    num_val: int = 0
-    num_test: int = 6
+    num_val: int = 10
+    num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
     num_coords: int = 70_000
@@ -84,8 +84,9 @@ class Params:
     # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
     # Inference ----------
     inference: bool = True
-    inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=042999.ckpt"
-    inf_max_epochs: int = 2500
+    inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=024999.ckpt"
+    # inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251201-175045-psf20k_SAonly/checkpoints/epoch-epoch=030999.ckpt"
+    inf_max_epochs: int = 5000
     inf_num_coords: int = 35_000
     inf_learning_rate_inr: float = 1e-5
     inf_learning_rate_latent: float = 1e-3
