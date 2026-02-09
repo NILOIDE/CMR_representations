@@ -1,8 +1,11 @@
+import math
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from typing import List, Optional, Tuple
 
 from data_utils import array_to_nifti
@@ -38,84 +41,301 @@ def scanner_to_image_coords(world_points: torch.Tensor, affines: torch.Tensor) -
 
 def crop_around_heart(affines: List[torch.Tensor],
                       segs: List[torch.Tensor],
-                      arrays: List[List[torch.Tensor]],
+                      images: List[List[torch.Tensor]],
+                      gt_avail_array: List[List[torch.Tensor]],
                       crop_size_2ch: Tuple[int, int] = (80, 80),
                       crop_size_3ch: Tuple[int, int] = (80, 80),
                       crop_size_4ch: Tuple[int, int] = (80, 80),
                       crop_size_sa: Tuple[int, int] = (80, 80),
                       debug=False) \
-        -> Tuple[List[torch.Tensor], List[torch.Tensor], List[List[torch.Tensor]]]:
-    centers = find_heart_center_on_slices(affines, segs)
-    centers = torch.stack(centers)
-    centers = centers.round().long()
-    crop_sizes = torch.tensor((crop_size_2ch, crop_size_3ch, crop_size_4ch, *[crop_size_sa]*len(affines[3:])),
-                              dtype=torch.long)
-    # New origin based on center
-    new_origins = (centers - crop_sizes//2).clip(min=0)
-    crop_ends = new_origins + crop_sizes
-    # Crop the segmentations
-    new_segs = [i[o[0]:e[0], o[1]:e[1]] for i, o, e in zip(segs, new_origins, crop_ends)]
-    new_arrays = []
-    for i, arr in enumerate(arrays):
-        new_arr = [i[o[0]:e[0], o[1]:e[1]] for i, o, e in zip(arr, new_origins, crop_ends)]
-        new_arrays.append(new_arr)
-    new_affines = [update_affine_after_crop(aff, o) for aff, o, in zip(affines, new_origins)]
-    # for i, affine in enumerate(affines):
-    #     new_affine = affine.clone()
-    #     # The translation in image coordinates due to cropping
-    #     offset = torch.tensor([new_origins[i][0], new_origins[i][1], 0.0], dtype=affine.dtype, device=affine.device)
-    #     # Convert the pixel offset to scanner space offset
-    #     scanner_offset = affine[:3, :3] @ offset
-    #     # Update the translation component (last column, first 3 rows)
-    #     new_affine[:3, 3] += scanner_offset
-    #     new_affines.append(new_affine)
+        -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
+    # 1. Get centers in ORIGINAL coordinates
+    centers, angles = find_heart_center_and_rotations(affines, segs)
+
+    crop_sizes = torch.tensor((crop_size_2ch, crop_size_3ch, crop_size_4ch,
+                               *[crop_size_sa] * len(affines[3:])), dtype=torch.long)
+
+    new_segs = []
+    new_images = []
+    new_gt_avails = []
+    new_affines = []
+
+    for i, (affine, seg, im, gt_avail, center_orig, size, angle) in enumerate(zip(
+            affines, segs, images, gt_avail_array, centers, crop_sizes, angles
+    )):
+        origin = (center_orig.round().long() - size // 2).clip(min=0)
+        end = origin + size
+        # Segs
+        seg_rot = rotate_slice(seg, angle, mode='nearest', center_rc=center_orig)
+        seg_crop = seg_rot[origin[0]:end[0], origin[1]:end[1]]
+        new_segs.append(seg_crop)
+
+        # Images
+        im_rot = rotate_slice(im, angle, mode='bilinear', center_rc=center_orig)
+        im_crop = im_rot[origin[0]:end[0], origin[1]:end[1]]
+        new_images.append(im_crop)
+
+        # GT Avail
+        gt_rot = rotate_slice(gt_avail, angle, mode='nearest', center_rc=center_orig)
+        gt_crop = gt_rot[origin[0]:end[0], origin[1]:end[1]]
+        new_gt_avails.append(gt_crop)
+
+        # --- D. Update Affine ---
+        # Update logic: Map [Crop Index] -> [Rotated Image Index] -> [Original Image Index] -> [World]
+        new_aff = update_affine_rotate_then_crop(affine, origin, angle, center_orig)
+        new_affines.append(new_aff)
     if debug:
-        [to_gif(torch.cat((s.float()/4, im), dim=1), 'debug_crop', str(i)) for i, (s, im) in enumerate(zip(new_segs, new_arrays[0]))]
-    return new_affines, new_segs, new_arrays
+        [to_gif(torch.cat((s.float()/4, im), dim=1), 'debug_crop', str(i)) for i, (s, im) in enumerate(zip(new_segs, new_images))]
+    return new_affines, new_segs, new_images, new_gt_avails
 
 
-def update_affine_after_crop(affine_matrix, crop_start_xy):
+def update_affine_rotate_then_crop(affine_matrix, crop_origin_rc, rotation_angle_deg, img_center_rc):
     """
-    Update affine matrix after cropping an image.
+    Update affine when the operation was:
+    1. Rotate Full Image around img_center
+    2. Crop sub-region starting at crop_origin
+    """
+    device = affine_matrix.device
+    dtype = affine_matrix.dtype
+
+    # 1. Coordinate Transform: Final Crop Index -> Rotated Image Index
+    # This is just a translation: Index_rot = Index_crop + Origin
+    # Matrix M1 = Translation(origin)
+
+    # 2. Coordinate Transform: Rotated Image Index -> Original Image Index
+    # If we rotated the image by +theta, the pixel at location X in the new grid
+    # corresponds to location R(-theta)(X - Center) + Center in the old grid.
+    # Matrix M2 = Translation(Center) @ Rotation(-theta) @ Translation(-Center)
+
+    theta = math.radians(rotation_angle_deg)
+    # We use -theta because we are mapping New Index -> Old Index
+    c, s = math.cos(-theta), math.sin(-theta)
+
+    rot_mat = torch.tensor([[c, -s],
+                            [s, c]], device=device, dtype=dtype)
+
+    center = torch.tensor([img_center_rc[0], img_center_rc[1]], device=device, dtype=dtype)
+    origin = torch.tensor([crop_origin_rc[0], crop_origin_rc[1]], device=device, dtype=dtype)
+
+    # Combine M2 and M1
+    # P_old = R * ( (P_crop + Origin) - Center ) + Center
+    #       = R * P_crop + R * (Origin - Center) + Center
+
+    # The linear part (Rotation)
+    M_combined = torch.eye(4, device=device, dtype=dtype)
+    M_combined[:2, :2] = rot_mat
+
+    # The translation part
+    # shift = R * (Origin - Center) + Center
+    shift_vec = rot_mat @ (origin - center) + center
+    M_combined[:2, 3] = shift_vec
+
+    # Final Affine = Old Affine @ M_combined
+    return affine_matrix @ M_combined
+
+
+def rotate_point_around_center(point: torch.Tensor, center: torch.Tensor, angle_deg: float) -> torch.Tensor:
+    """
+    Rotates a 2D coordinate point around a center point.
+    """
+    angle_rad = math.radians(angle_deg)
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+
+    # 2D Rotation Matrix (Counter-Clockwise)
+    # [ x' ] = [ cos -sin ] [ x - cx ]   [ cx ]
+    # [ y' ]   [ sin  cos ] [ y - cy ] + [ cy ]
+
+    # Note: point is usually (row, col) i.e. (y, x).
+    # Be careful with x/y vs row/col.
+    # Assuming point is (row, col) -> (y, x):
+    # If we rotate image CCW, the point (row, col) also moves CCW.
+
+    rel = point - center
+    # Matrix mult manually
+    # new_row = rel_row * cos - rel_col * sin
+    # new_col = rel_row * sin + rel_col * cos
+    new_row = rel[0] * c - rel[1] * s
+    new_col = rel[0] * s + rel[1] * c
+
+    return center + torch.stack([new_row, new_col])
+
+
+def rotate_slice(tensor: torch.Tensor,
+                 angle_deg: float,
+                 center_rc: Optional[torch.Tensor] = None,
+                 mode: str = 'bilinear') -> torch.Tensor:
+    """
+    Rotates a (H, W, T) tensor around a specific center point.
+
     Args:
-        affine_matrix: 4x4 affine transformation matrix
-        crop_start_xy: tuple of (x_start, y_start) crop coordinates
-    Returns:
-        Updated 4x4 affine matrix
+        tensor: Input tensor of shape (H, W, T) or (H, W, C).
+        angle_deg: Rotation angle in degrees (Counter-Clockwise).
+        center_rc: Optional (Row, Col) of the rotation center in pixel coordinates.
+                   If None, rotates around the image geometric center.
+        mode: Interpolation mode ('bilinear' or 'nearest').
     """
-    affine_new = affine_matrix.clone()
-    rotation = affine_matrix[:3, :3]
-    # Calculate offset in scanner coordinates
-    crop_start = torch.ones((3,))
-    crop_start[:2] = crop_start_xy
-    offset = rotation @ crop_start
-    # Update translation
-    affine_new[:3, 3] += offset
-    return affine_new
+    # 1. Shape Handling: (H, W, T) -> (T, 1, H, W)
+    orig_shape = tensor.shape
+    if len(orig_shape) == 3:
+        # User convention: (H, W, T) -> (T, 1, H, W)
+        tensor = tensor.permute(2, 0, 1).unsqueeze(1)
+    elif len(orig_shape) == 2:
+        # (H, W) -> (1, 1, H, W)
+        tensor = tensor.unsqueeze(0).unsqueeze(0)
+
+    N, C, H, W = tensor.shape
+    device = tensor.device
+    dtype = torch.float32  # grid requires float
+
+    # 2. Define Rotation Angle (Inverse logic for grid_sample)
+    # To rotate image CCW by X, we sample from grid rotated CW by X (-X).
+    angle_rad = -math.radians(angle_deg)
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    rot_matrix = torch.tensor([[c, -s],
+                               [s, c]], device=device, dtype=dtype)
+
+    # 3. Calculate Translation for Center
+    if center_rc is not None:
+        if isinstance(center_rc, (tuple, list)):
+            center_rc = torch.tensor(center_rc, device=device, dtype=dtype)
+
+        # Convert pixel (Row, Col) -> normalized (x, y) range [-1, 1]
+        # Note: grid_sample (x,y) corresponds to (Col, Row)
+        # align_corners=False convention:
+        #   -1 maps to -0.5 index
+        #    1 maps to size-0.5 index
+        # Formula: norm = (2 * (pix + 0.5) / size) - 1
+
+        center_row, center_col = center_rc[0], center_rc[1]
+
+        norm_x = (2.0 * (center_col + 0.5) / W) - 1.0
+        norm_y = (2.0 * (center_row + 0.5) / H) - 1.0
+
+        center_norm = torch.tensor([norm_x, norm_y], device=device, dtype=dtype)
+
+        # The affine grid transformation is: P_in = R * P_out + T
+        # We want P_out = Center -> P_in = Center (Fixed Point)
+        # Center = R * Center + T  =>  T = Center - R * Center
+
+        translation = center_norm - (rot_matrix @ center_norm)
+    else:
+        translation = torch.zeros(2, device=device, dtype=dtype)
+
+    # 4. Construct Full Affine Matrix (2x3)
+    # [ c  -s  tx ]
+    # [ s   c  ty ]
+    theta = torch.zeros((1, 2, 3), device=device, dtype=dtype)
+    theta[0, :2, :2] = rot_matrix
+    theta[0, :2, 2] = translation
+
+    # Tile for batch size
+    theta = theta.repeat(N, 1, 1)
+
+    # 5. Grid Sample
+    grid = F.affine_grid(theta, tensor.size(), align_corners=False)
+    rotated = F.grid_sample(tensor.float(), grid, mode=mode, padding_mode='zeros', align_corners=False)
+
+    # 6. Restore Shape
+    if len(orig_shape) == 3:
+        # (T, 1, H, W) -> (H, W, T)
+        return rotated.squeeze(1).permute(1, 2, 0).to(tensor.dtype)
+    elif len(orig_shape) == 2:
+        return rotated.squeeze(0).squeeze(0).to(tensor.dtype)
 
 
-
-
-def find_heart_center_on_slices(affines: List[torch.Tensor],
-                                segs: Optional[List[torch.Tensor]] = None,
-                                debug=False) -> List[torch.Tensor]:
-    # Find heart center coord in mid-ventricular slice
+def find_heart_center_and_rotations(affines: List[torch.Tensor],
+                                    segs: Optional[List[torch.Tensor]] = None) \
+        -> Tuple[List[torch.Tensor], List[float]]:
+    """
+    Returns center coordinates for cropping AND rotation angles to align
+    LA slices with the SA plane.
+    """
+    # --- 1. Original Center Logic ---
     lv_basal_slice, lv_apex_slice = find_basal_apical_from_sa_segmentation(segs[3:])
-    lv_basal_slice, lv_apex_slice = 3+lv_basal_slice, 3+lv_apex_slice
-    lv_midventr_slice = (lv_apex_slice + lv_basal_slice) // 2
+    # Adjust indices (SA starts at index 3 in the lists)
+    lv_basal_slice, lv_apex_slice = 3 + lv_basal_slice, 3 + lv_apex_slice
+
+    lv_midventr_slice = (lv_apex_slice + lv_basal_slice) // 2 - 1
+
+    # Get centers from mid-ventricular slice
     midventr_lv_center = get_center_coord(segs[lv_midventr_slice][..., 0] == 1)
     midventr_rv_center = get_center_coord(segs[lv_midventr_slice][..., 0] == 3)
     midventr_heart_center = (midventr_lv_center + midventr_rv_center) / 2
 
     # Project center coordinate to LA slices
     midventr_heart_center_aug = torch.cat((midventr_heart_center, torch.tensor((0,)), torch.tensor((1,))), dim=0)
+
     la2ch_center = scanner_to_image_coords(affines[lv_midventr_slice] @ midventr_heart_center_aug, affines[0])[0, :2]
     la3ch_center = scanner_to_image_coords(affines[lv_midventr_slice] @ midventr_heart_center_aug, affines[1])[0, :2]
     la4ch_center = scanner_to_image_coords(affines[lv_midventr_slice] @ midventr_heart_center_aug, affines[2])[0, :2]
-    # Assume SA slices are parallel. heart center is other SA slices is same as mid-ventricular slice
+
     sa_centers = [midventr_heart_center] * len(affines[3:])
     centers = [la2ch_center, la3ch_center, la4ch_center, *sa_centers]
-    return centers
+
+    # --- 2. New Rotation Logic ---
+    # We use the FIRST SA slice (index 3) as the reference plane.
+    ref_sa_affine = affines[3]
+
+    # Calculate angles for LA slices (indices 0, 1, 2)
+    angle_2ch = get_intersection_angle(affines[0], ref_sa_affine)
+    angle_3ch = get_intersection_angle(affines[1], ref_sa_affine)
+    angle_4ch = get_intersection_angle(affines[2], ref_sa_affine)
+
+    # SA slices do not need rotation relative to themselves (0.0)
+    sa_angles = [0.0] * len(affines[3:])
+
+    angles = [angle_2ch, angle_3ch, angle_4ch, *sa_angles]
+
+    return centers, angles
+
+
+def get_intersection_angle(la_affine: torch.Tensor, sa_affine: torch.Tensor) -> float:
+    """
+    Calculates the rotation angle required to make the intersection of the
+    SA plane with the LA image horizontal.
+    """
+    device = la_affine.device
+
+    # 1. Get Plane Normals in World Space
+    # The normal is the cross product of the first two columns (X and Y vectors)
+    # or roughly the 3rd column (slice direction)
+
+    # LA Normal
+    vec_u_la = la_affine[:3, 0]
+    vec_v_la = la_affine[:3, 1]
+    normal_la = torch.cross(vec_u_la, vec_v_la)
+
+    # SA Normal (Reference Plane)
+    vec_u_sa = sa_affine[:3, 0]
+    vec_v_sa = sa_affine[:3, 1]
+    normal_sa = torch.cross(vec_u_sa, vec_v_sa)
+
+    # 2. Calculate Intersection Vector in World Space
+    # The intersection of two planes is perpendicular to both normals
+    intersect_vec_world = torch.cross(normal_la, normal_sa)
+
+    # Handle parallel planes edge case (norm is near 0)
+    if torch.linalg.norm(intersect_vec_world) < 1e-4:
+        return 0.0
+
+    # 3. Project Intersection Vector into LA Image Space
+    # We need to express intersect_vec_world as (u, v) components in the LA image.
+    # We can solve the linear system: V_world = u * U_la + v * V_la + w * W_la
+    # Or simply multiply by inverse of rotational part of LA affine
+
+    la_rotation_matrix = la_affine[:3, :3]
+    # V_img = inv(R) @ V_world
+    intersect_vec_img = torch.linalg.solve(la_rotation_matrix, intersect_vec_world)
+
+    # 4. Calculate Angle in Image Plane (u, v)
+    u, v = intersect_vec_img[0], intersect_vec_img[1]
+    angle_rad = math.atan2(v, u)
+    angle_deg = math.degrees(angle_rad)
+
+    # 5. Determine Correction Angle
+    # If the line is at +30 deg, we want to rotate the image by -30 deg to make it 0 (horizontal).
+    return -angle_deg
 
 
 def find_LV_center_on_slices_from_intersections(affines: List[torch.Tensor],
@@ -383,6 +603,19 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
         fold = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}'
         path = path / fold
         path.mkdir(exist_ok=True, parents=True)
+        la2ch_seg = deepcopy(la2ch_seg)
+        la3ch_seg = deepcopy(la3ch_seg)
+        la4ch_seg = deepcopy(la4ch_seg)
+        segs = deepcopy(segs)
+        la2ch_seg[0] = 4
+        la3ch_seg[0] = 4
+        la4ch_seg[0] = 4
+        la2ch_seg[-1] = 4
+        la3ch_seg[-1] = 4
+        la4ch_seg[-1] = 4
+        for s in segs:
+            s[0] = 4
+            s[-1] = 4
         array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], affines[0].numpy())
         array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], affines[1].numpy())
         array_to_nifti(str(path/f"pre_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], affines[2].numpy())

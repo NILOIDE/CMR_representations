@@ -26,27 +26,29 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
-    logging_rate: int = 5_000
-    logging_start_rate: int = 20_000
-    addit_log_epochs: Tuple[int, ...] = ()
+    logging_rate: int = 2_000
+    logging_start_rate: int = 2_000
+    addit_log_epochs: Tuple[int, ...] = (500,1000,)
     num_train: int = 100
-    num_val: int = 10
+    num_val: int = 2
     num_test: int = 1
     num_workers: int = 8
     batch_size: int = 4
-    num_coords: int = 70_000
+
+    num_coords: int = 40_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 20_000
+    point_spread_start_epoch: int = 0
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 35000
+    num_coords_during_point_spread: int = 20000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
-    point_spread_std_after: Tuple[float, float, float, float] = (0.4, 0.4, 0.4, 0.4)
+    point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
-    latent_size: int = 128
+    latent_size: int = 8
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
+    spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     # Conv latent prediction -------------------------------------------------------------------
     use_conv: bool = False
     conv_channels: Tuple[int, ...] = (32,64,64,128,128)
@@ -57,22 +59,15 @@ class Params:
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 1e0
+    weight_loss_seg: float = 0e0
     weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
-    # Registration ---------------------------------------------------------------
-    regist_task_start_epoch: int = 999000
-    regist_weights_std: float = 1e-3
-    weight_loss_regist_recon: float = 1e-1
-    weight_loss_regist_seg: float = 1e-1
-    weight_loss_regist_jac_reg: float = 1e-1
-    weight_loss_regist_mag_reg: float = 1e-1
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (7,7,7,5,5)
-    pe_anneal_max_iter: int = 100_000
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
+    pe_anneal_max_iter: int = 10_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
@@ -83,10 +78,9 @@ class Params:
     resume_checkpoint_path: str = ""
     # resume_checkpoint_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=029999.ckpt"
     # Inference ----------
-    inference: bool = True
+    inference: bool = False
     inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=024999.ckpt"
-    # inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251201-175045-psf20k_SAonly/checkpoints/epoch-epoch=030999.ckpt"
-    inf_max_epochs: int = 5000
+    inf_max_epochs: int = 2000
     inf_num_coords: int = 35_000
     inf_learning_rate_inr: float = 1e-5
     inf_learning_rate_latent: float = 1e-3
@@ -156,7 +150,6 @@ def main():
             logger=logger,
             callbacks=[checkpoint_callback],
             accelerator='gpu',
-            devices=1,
             max_epochs=params.point_spread_start_epoch,
             fast_dev_run=False,
             limit_train_batches=1.0,
@@ -173,10 +166,6 @@ def main():
     else:
         ckpt = torch.load(params.inference_path)
         model.load_state_dict(ckpt['state_dict'])
-        # prefix = "canonical_inr."
-        # # Filter + rename keys
-        # filtered = {k[len(prefix):]: v for k, v in ckpt['state_dict'].items() if k.startswith(prefix)}
-        # model.canonical_inr.load_state_dict(filtered, strict=True)
         model.canonical_inr = model.canonical_inr.to('cuda')
         model.target_net = deepcopy(model.canonical_inr)
         model.regist_inr = model.regist_inr.to('cuda')

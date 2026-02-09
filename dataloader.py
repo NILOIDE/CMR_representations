@@ -249,7 +249,6 @@ class CMRDataModule(pl.LightningDataModule):
         print(f"Found {len(images)} subjects.")
 
         subject_data_paths = self.preprocess_subject_data(images, segs, segs_auto, interp_segs, seg_categories)
-
         return subject_data_paths
 
     def preprocess_subject_data(self, subj_paths, seg_paths, seg_paths_auto, interp_seg_paths=None, seg_type_categories=None, debug=False):
@@ -309,10 +308,11 @@ class CMRDataModule(pl.LightningDataModule):
                             except FileNotFoundError:
                                 # If we couldn't load the interpolated seg earlier,
                                 # we create it and save it so we don't repeat the slow interp process next time
-                                segs_auto = [nib.load(subj_seg_slices[p].get_fdata().squeeze().astype(np.uint8)) for p in seg_paths_auto[3:]]
-                                interp_seg, int_interp = interpolate_sa_segs_to_la([segs_auto],
-                                                                                   [i.numpy() for i in images[3:]],
-                                                                                   [i.numpy() for i in affines[3:]],
+                                segs_auto = [nib.load(p).get_fdata().squeeze().astype(np.uint8) for p in seg_paths_auto[subj_idx][3:]]
+                                segs_auto_affs = [nib.load(p).affine for p in seg_paths_auto[subj_idx][3:]]
+                                interp_seg, int_interp = interpolate_sa_segs_to_la(segs_auto,
+                                                                                   segs_auto,
+                                                                                   segs_auto_affs,
                                                                                    target_shape=(
                                                                                        img.shape[0], img.shape[1],
                                                                                        img.shape[-1]),
@@ -339,8 +339,8 @@ class CMRDataModule(pl.LightningDataModule):
 
                 if self.crop_around_heart:
                     # Crop images and update affine matrices with new origins
-                    affines, segs, (images, gt_available_masks) = \
-                        crop_around_heart(affines, segs, [images, gt_available_masks])
+                    affines, segs, images, gt_available_masks = \
+                        crop_around_heart(affines, segs, images, gt_available_masks)
                 # Normalize orientation of planes and store the 6 aff params
                 try:
                     affines = normalize_slice_orientation(affines, segs)
