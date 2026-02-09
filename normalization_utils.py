@@ -39,18 +39,20 @@ def scanner_to_image_coords(world_points: torch.Tensor, affines: torch.Tensor) -
     # Return the spatial coordinates (drop homogeneous coordinate)
     return world_points[:, :3]
 
+
 def crop_around_heart(affines: List[torch.Tensor],
                       segs: List[torch.Tensor],
-                      images: List[List[torch.Tensor]],
-                      gt_avail_array: List[List[torch.Tensor]],
+                      images: List[torch.Tensor],
+                      gt_avail_array: List[torch.Tensor],
                       crop_size_2ch: Tuple[int, int] = (80, 80),
                       crop_size_3ch: Tuple[int, int] = (80, 80),
                       crop_size_4ch: Tuple[int, int] = (80, 80),
                       crop_size_sa: Tuple[int, int] = (80, 80),
-                      debug=False) \
+                      debug=False,
+                      rotate=True) \
         -> Tuple[List[torch.Tensor], List[torch.Tensor], List[torch.Tensor], List[torch.Tensor]]:
     # 1. Get centers in ORIGINAL coordinates
-    centers, angles = find_heart_center_and_rotations(affines, segs)
+    centers, angles = find_heart_center_and_rotations(affines, segs, rotate=rotate)
 
     crop_sizes = torch.tensor((crop_size_2ch, crop_size_3ch, crop_size_4ch,
                                *[crop_size_sa] * len(affines[3:])), dtype=torch.long)
@@ -60,78 +62,175 @@ def crop_around_heart(affines: List[torch.Tensor],
     new_gt_avails = []
     new_affines = []
 
-    for i, (affine, seg, im, gt_avail, center_orig, size, angle) in enumerate(zip(
+    for i, (affine, seg, im, gt_avail, center, size, angle) in enumerate(zip(
             affines, segs, images, gt_avail_array, centers, crop_sizes, angles
     )):
-        origin = (center_orig.round().long() - size // 2).clip(min=0)
-        end = origin + size
+        new_origin = (center.round().long() - size // 2).clip(min=0)
+        end = new_origin + size
         # Segs
-        seg_rot = rotate_slice(seg, angle, mode='nearest', center_rc=center_orig)
-        seg_crop = seg_rot[origin[0]:end[0], origin[1]:end[1]]
+        seg_rot = rotate_slice(seg, angle, mode='nearest', center_rc=center)
+        seg_crop = seg_rot[new_origin[0]:end[0], new_origin[1]:end[1]]
         new_segs.append(seg_crop)
 
         # Images
-        im_rot = rotate_slice(im, angle, mode='bilinear', center_rc=center_orig)
-        im_crop = im_rot[origin[0]:end[0], origin[1]:end[1]]
+        im_rot = rotate_slice(im, angle, mode='bilinear', center_rc=center)
+        im_crop = im_rot[new_origin[0]:end[0], new_origin[1]:end[1]]
         new_images.append(im_crop)
 
         # GT Avail
-        gt_rot = rotate_slice(gt_avail, angle, mode='nearest', center_rc=center_orig)
-        gt_crop = gt_rot[origin[0]:end[0], origin[1]:end[1]]
+        gt_rot = rotate_slice(gt_avail, angle, mode='nearest', center_rc=center)
+        gt_crop = gt_rot[new_origin[0]:end[0], new_origin[1]:end[1]]
         new_gt_avails.append(gt_crop)
 
-        # --- D. Update Affine ---
+        # Update Affine
         # Update logic: Map [Crop Index] -> [Rotated Image Index] -> [Original Image Index] -> [World]
-        new_aff = update_affine_rotate_then_crop(affine, origin, angle, center_orig)
+        new_aff = update_affine_arbitrary_rotation_crop(affine, angle, center, new_origin)
         new_affines.append(new_aff)
     if debug:
-        [to_gif(torch.cat((s.float()/4, im), dim=1), 'debug_crop', str(i)) for i, (s, im) in enumerate(zip(new_segs, new_images))]
+        path = Path('debug_crop')
+        fold = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}'
+        path = path / fold
+        path.mkdir(exist_ok=True, parents=True)
+        # -------- Logging segmentations gifs  ----------------------------
+        [to_gif(torch.cat((s.float()/4, im), dim=1), str(path / "gifs"), str(i)) for i, (s, im) in enumerate(zip(new_segs, new_images))]
+        # -------- Logging segmentations as niftis ----------------------------
+        assert segs is not None
+        la2ch_seg = new_segs[0]
+        if not la2ch_seg.any():
+            la2ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in new_affines[3:]],
+                                                     target_shape=(segs[0].shape[0], segs[0].shape[1], segs[0].shape[-1]),
+                                                     target_aff=new_affines[0].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
+        else:
+            la2ch_seg = la2ch_seg.numpy()
+        la3ch_seg = new_segs[1]
+        if not la3ch_seg.any():
+            la3ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in new_affines[3:]],
+                                                     target_shape=(segs[1].shape[0], segs[1].shape[1], segs[1].shape[-1]),
+                                                     target_aff=new_affines[1].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
+        else:
+            la3ch_seg = la3ch_seg.numpy()
+        la4ch_seg = new_segs[2]
+        if not la4ch_seg.any():
+            la4ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in segs[3:]],
+                                                     [i.numpy() for i in new_affines[3:]],
+                                                     target_shape=(segs[2].shape[0], segs[2].shape[1], segs[2].shape[-1]),
+                                                     target_aff=new_affines[2].numpy(),
+                                                     frames=None,
+                                                     oob_dist_thresh=10.)
+        else:
+            la4ch_seg = la4ch_seg.numpy()
+        la2ch_seg = deepcopy(la2ch_seg)
+        la3ch_seg = deepcopy(la3ch_seg)
+        la4ch_seg = deepcopy(la4ch_seg)
+        new_segs_2 = deepcopy(new_segs)
+        la2ch_seg[0] = 4
+        la2ch_seg[:, 0] = 4
+        la3ch_seg[0] = 4
+        la3ch_seg[:, 0] = 4
+        la4ch_seg[0] = 4
+        la4ch_seg[:, 0] = 4
+        la2ch_seg[-1] = 4
+        la2ch_seg[:, -1] = 4
+        la3ch_seg[-1] = 4
+        la3ch_seg[:, -1] = 4
+        la4ch_seg[-1] = 4
+        la4ch_seg[:, -1] = 4
+        for s in new_segs_2:
+            s[0] = 4
+            s[-1] = 4
+            s[:, 0] = 4
+            s[:, -1] = 4
+        array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), segs[0][:, :, None].numpy().astype(int), affines[0].numpy())
+        array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), segs[1][:, :, None].numpy().astype(int), affines[1].numpy())
+        array_to_nifti(str(path/f"pre_opt_la4ch.nii.gz"), segs[2][:, :, None].numpy().astype(int), affines[2].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa3.nii.gz"), segs[6][:, :, None].numpy().astype(int), affines[6].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa4.nii.gz"), segs[7][:, :, None].numpy().astype(int), affines[7].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa5.nii.gz"), segs[8][:, :, None].numpy().astype(int), affines[8].numpy())
+        array_to_nifti(str(path/f"post_opt_la2ch.nii.gz"), la2ch_seg[:, :, None].astype(int), new_affines[0].numpy())
+        array_to_nifti(str(path/f"post_opt_la3ch.nii.gz"), la3ch_seg[:, :, None].astype(int), new_affines[1].numpy())
+        array_to_nifti(str(path/f"post_opt_la4ch.nii.gz"), la4ch_seg[:, :, None].astype(int), new_affines[2].numpy())
+        array_to_nifti(str(path/f"post_opt_sa3.nii.gz"), new_segs_2[6][:, :, None].numpy().astype(int), new_affines[6].numpy())
+        array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), new_segs_2[7][:, :, None].numpy().astype(int), new_affines[7].numpy())
+        array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), new_segs_2[8][:, :, None].numpy().astype(int), new_affines[8].numpy())
+
     return new_affines, new_segs, new_images, new_gt_avails
 
 
-def update_affine_rotate_then_crop(affine_matrix, crop_origin_rc, rotation_angle_deg, img_center_rc):
+def update_affine_arbitrary_rotation_crop(original_affine, angle_degrees, pivot_point, crop_offset):
     """
-    Update affine when the operation was:
-    1. Rotate Full Image around img_center
-    2. Crop sub-region starting at crop_origin
+    Computes the new affine matrix after in-plane rotation and cropping.
+
+    Parameters:
+    - original_affine: 4x4 numpy array (Pixel -> World)
+    - crop_offset: tuple (x, y, z). The top-left corner of the crop
+                   *relative to the rotated image grid*.
+    - angle_degrees: Rotation angle (counter-clockwise).
+    - pivot_point: tuple (x, y, z). The point in the *original image* around which to rotate.
+
+    Returns:
+    - new_affine: The 4x4 matrix mapping the new cropped/rotated pixel space
+                  directly to world space.
     """
-    device = affine_matrix.device
-    dtype = affine_matrix.dtype
 
-    # 1. Coordinate Transform: Final Crop Index -> Rotated Image Index
-    # This is just a translation: Index_rot = Index_crop + Origin
-    # Matrix M1 = Translation(origin)
+    # --- 1. Create the Crop Matrix (Translation) ---
+    # Maps "Cropped Pixel" -> "Rotated (Full) Pixel"
+    # This simply adds the offset to the pixel index.
+    cx, cy, cz = crop_offset[0], crop_offset[1], 0.0
+    M_crop = np.array([
+        [1, 0, 0, cx],
+        [0, 1, 0, cy],
+        [0, 0, 1, cz],
+        [0, 0, 0, 1]
+    ])
 
-    # 2. Coordinate Transform: Rotated Image Index -> Original Image Index
-    # If we rotated the image by +theta, the pixel at location X in the new grid
-    # corresponds to location R(-theta)(X - Center) + Center in the old grid.
-    # Matrix M2 = Translation(Center) @ Rotation(-theta) @ Translation(-Center)
+    # --- 2. Create the Rotation Matrix (with Pivot) ---
+    # Maps "Rotated Pixel" -> "Original Source Pixel"
+    px, py, pz = pivot_point[0], pivot_point[1], 0.0
+    theta = math.radians(angle_degrees)
+    c, s = math.cos(theta), math.sin(theta)
 
-    theta = math.radians(rotation_angle_deg)
-    # We use -theta because we are mapping New Index -> Old Index
-    c, s = math.cos(-theta), math.sin(-theta)
+    # Translate Pivot to Origin
+    T_to_origin = np.array([
+        [1, 0, 0, -px],
+        [0, 1, 0, -py],
+        [0, 0, 1, -pz],
+        [0, 0, 0, 1]
+    ])
 
-    rot_mat = torch.tensor([[c, -s],
-                            [s, c]], device=device, dtype=dtype)
+    # Rotate around Z (In-plane)
+    R_z = np.array([
+        [c, -s, 0, 0],
+        [s, c, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
 
-    center = torch.tensor([img_center_rc[0], img_center_rc[1]], device=device, dtype=dtype)
-    origin = torch.tensor([crop_origin_rc[0], crop_origin_rc[1]], device=device, dtype=dtype)
+    # Translate Pivot back
+    T_back = np.array([
+        [1, 0, 0, px],
+        [0, 1, 0, py],
+        [0, 0, 1, pz],
+        [0, 0, 0, 1]
+    ])
 
-    # Combine M2 and M1
-    # P_old = R * ( (P_crop + Origin) - Center ) + Center
-    #       = R * P_crop + R * (Origin - Center) + Center
+    # Compose Rotation: Move -> Rotate -> Move Back
+    M_rot = T_back @ R_z @ T_to_origin
 
-    # The linear part (Rotation)
-    M_combined = torch.eye(4, device=device, dtype=dtype)
-    M_combined[:2, :2] = rot_mat
+    # --- 3. Combine All ---
+    # Order: World <- Original <- Rotated <- Cropped
+    # We multiply the original affine by the modifiers on the right.
+    new_affine = original_affine @ M_rot @ M_crop
 
-    # The translation part
-    # shift = R * (Origin - Center) + Center
-    shift_vec = rot_mat @ (origin - center) + center
-    M_combined[:2, 3] = shift_vec
-
-    # Final Affine = Old Affine @ M_combined
-    return affine_matrix @ M_combined
+    return new_affine
 
 
 def rotate_point_around_center(point: torch.Tensor, center: torch.Tensor, angle_deg: float) -> torch.Tensor:
@@ -245,7 +344,8 @@ def rotate_slice(tensor: torch.Tensor,
 
 
 def find_heart_center_and_rotations(affines: List[torch.Tensor],
-                                    segs: Optional[List[torch.Tensor]] = None) \
+                                    segs: Optional[List[torch.Tensor]] = None,
+                                    rotate=False) \
         -> Tuple[List[torch.Tensor], List[float]]:
     """
     Returns center coordinates for cropping AND rotation angles to align
@@ -272,6 +372,8 @@ def find_heart_center_and_rotations(affines: List[torch.Tensor],
 
     sa_centers = [midventr_heart_center] * len(affines[3:])
     centers = [la2ch_center, la3ch_center, la4ch_center, *sa_centers]
+    if not rotate:
+        return centers, [0.0 for _ in centers]
 
     # --- 2. New Rotation Logic ---
     # We use the FIRST SA slice (index 3) as the reference plane.
@@ -285,7 +387,7 @@ def find_heart_center_and_rotations(affines: List[torch.Tensor],
     # SA slices do not need rotation relative to themselves (0.0)
     sa_angles = [0.0] * len(affines[3:])
 
-    angles = [angle_2ch, angle_3ch, angle_4ch, *sa_angles]
+    angles = [-angle_2ch, -angle_3ch, -angle_4ch, *sa_angles]
 
     return centers, angles
 
@@ -560,7 +662,7 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
         ang_24ch_la_z_2 = min(ang_24ch_la_z_2, abs(180-ang_24ch_la_z_2))
         ang_24ch_la_y_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([0., 1., 0.]))).abs().item()
         ang_24ch_la_x_2 = torch.rad2deg(angle_between_vectors(v[0, 1] - v[0, 0], torch.tensor([1., 0., 0.]))).abs().item()
-        thresh = 10.0 if use_sa_normal_as_la else 1.
+        thresh = 12.0 if use_sa_normal_as_la else 1.
         if ang_24ch_la_z_2 > thresh:
             raise ValueError
         if abs(ang_24ch_la_y_2 - 90) > thresh or abs(ang_24ch_la_x_2 - 90) > thresh:
@@ -568,7 +670,7 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
         w_lv_center_2 = plane_line_intersection(v[0, 1], v[0, 0],
                                             planes[lv_midventr_slice])
         w_myo_center_2 = (oriented_affines[lv_midventr_slice] @ i_myo_center_aug.T).T
-        if  w_myo_center_2[:3].norm() > 1e-4:
+        if w_myo_center_2[:3].norm() > 1e-4:
             raise ValueError
         # -------- Logging segmentations as niftis ----------------------------
         assert segs is not None
@@ -581,6 +683,8 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
                                                      target_aff=affines[0].numpy(),
                                                      frames=None,
                                                      oob_dist_thresh=10.)
+        else:
+            la2ch_seg = la2ch_seg.numpy()
         la3ch_seg = segs[0]
         if not la3ch_seg.any():
             la3ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
@@ -590,6 +694,8 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
                                                      target_aff=affines[1].numpy(),
                                                      frames=None,
                                                      oob_dist_thresh=10.)
+        else:
+            la3ch_seg = la3ch_seg.numpy()
         la4ch_seg = segs[0]
         if not la4ch_seg.any():
             la4ch_seg, _ = interpolate_sa_segs_to_la([i.numpy() for i in segs[3:]],
@@ -599,6 +705,8 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
                                                      target_aff=affines[2].numpy(),
                                                      frames=None,
                                                      oob_dist_thresh=10.)
+        else:
+            la4ch_seg = la4ch_seg.numpy()
         path = Path('debug_alignment')
         fold = f'{datetime.now().strftime("%Y%m%d-%H%M%S")}'
         path = path / fold
@@ -616,16 +724,16 @@ def normalize_slice_orientation(affines: List[torch.Tensor],
         for s in segs:
             s[0] = 4
             s[-1] = 4
-        array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], affines[0].numpy())
-        array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], affines[1].numpy())
-        array_to_nifti(str(path/f"pre_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], affines[2].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa3.nii.gz"), segs[6][:, :, None].numpy(), affines[6].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa4.nii.gz"), segs[7][:, :, None].numpy(), affines[7].numpy())
-        array_to_nifti(str(path/f"pre_opt_sa5.nii.gz"), segs[8][:, :, None].numpy(), affines[8].numpy())
-        array_to_nifti(str(path/f"post_opt_la2ch.nii.gz"), la2ch_seg[:, :, None], final_affines[0].numpy())
-        array_to_nifti(str(path/f"post_opt_la3ch.nii.gz"), la3ch_seg[:, :, None], final_affines[1].numpy())
-        array_to_nifti(str(path/f"post_opt_la4ch.nii.gz"), la4ch_seg[:, :, None], final_affines[2].numpy())
-        array_to_nifti(str(path/f"post_opt_sa3.nii.gz"), segs[6][:, :, None].numpy(), final_affines[6].numpy())
-        array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), segs[7][:, :, None].numpy(), final_affines[7].numpy())
-        array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), segs[8][:, :, None].numpy(), final_affines[8].numpy())
+        array_to_nifti(str(path/f"pre_opt_la2ch.nii.gz"), la2ch_seg[:, :, None].astype(int), affines[0].numpy())
+        array_to_nifti(str(path/f"pre_opt_la3ch.nii.gz"), la3ch_seg[:, :, None].astype(int), affines[1].numpy())
+        array_to_nifti(str(path/f"pre_opt_la4ch.nii.gz"), la4ch_seg[:, :, None].astype(int), affines[2].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa3.nii.gz"), segs[6][:, :, None].numpy().astype(int), affines[6].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa4.nii.gz"), segs[7][:, :, None].numpy().astype(int), affines[7].numpy())
+        array_to_nifti(str(path/f"pre_opt_sa5.nii.gz"), segs[8][:, :, None].numpy().astype(int), affines[8].numpy())
+        array_to_nifti(str(path/f"post_opt_la2ch.nii.gz"), la2ch_seg[:, :, None].astype(int), final_affines[0].numpy())
+        array_to_nifti(str(path/f"post_opt_la3ch.nii.gz"), la3ch_seg[:, :, None].astype(int), final_affines[1].numpy())
+        array_to_nifti(str(path/f"post_opt_la4ch.nii.gz"), la4ch_seg[:, :, None].astype(int), final_affines[2].numpy())
+        array_to_nifti(str(path/f"post_opt_sa3.nii.gz"), segs[6][:, :, None].numpy().astype(int), final_affines[6].numpy())
+        array_to_nifti(str(path/f"post_opt_sa4.nii.gz"), segs[7][:, :, None].numpy().astype(int), final_affines[7].numpy())
+        array_to_nifti(str(path/f"post_opt_sa5.nii.gz"), segs[8][:, :, None].numpy().astype(int), final_affines[8].numpy())
     return final_affines

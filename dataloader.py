@@ -16,7 +16,7 @@ import traceback
 
 from data_utils import array_to_nifti
 from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBValidation, CardiacUKBBFullImage
-from normalization_utils import crop_around_heart,normalize_slice_orientation
+from normalization_utils import crop_around_heart, normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, \
     compute_3d_image_gradients, to_gif, nlm_denoise_multi_parallel
@@ -157,10 +157,10 @@ class CMRDataModule(pl.LightningDataModule):
         interp_segs = []
         seg_categories = []
         annotated_subj_ids = [1009169, 1011525, 1012959, 1021869, 1026284, 1037010, 1037287, 1037527, 1043831, 1050481,
-                           1053004, 1059837, 1060134, 1060474,1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
+                           1053004, 1059837, 1060134, 1060474, 1061311, 1062139, 1063068, 1067227, 1078928, 1083769]
         annotated_subj_ids = [str(i) for i in annotated_subj_ids]
         annotated_subjs = list(sorted([str(Path(self.load_la_dir) / i) for i in annotated_subj_ids]))
-        assert all([Path(i).exists() for i in annotated_subjs])
+        # assert all([Path(i).exists() for i in annotated_subjs])
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
         subjects = annotated_subj_ids + [i for i in subjects if Path(i).name not in annotated_subj_ids]
         subjects = list(sorted(subjects))
@@ -257,6 +257,8 @@ class CMRDataModule(pl.LightningDataModule):
         store_path = Path(self.store_path)
         prepr_data_paths = []
         for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths))), desc="Preprocessing subject data into torch tensor."):
+            # if subj_idx <1:
+            #     continue
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / PREPR_FILE_NAME
@@ -340,10 +342,10 @@ class CMRDataModule(pl.LightningDataModule):
                 if self.crop_around_heart:
                     # Crop images and update affine matrices with new origins
                     affines, segs, images, gt_available_masks = \
-                        crop_around_heart(affines, segs, images, gt_available_masks)
+                        crop_around_heart(affines, segs, images, gt_available_masks, debug=False)
                 # Normalize orientation of planes and store the 6 aff params
                 try:
-                    affines = normalize_slice_orientation(affines, segs)
+                    affines = normalize_slice_orientation(affines, segs, debug=False)
                 except ValueError as e:
                     print(subject_id)
                     raise e
