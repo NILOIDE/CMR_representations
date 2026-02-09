@@ -24,6 +24,7 @@ c_red = (0, 0, 255)
 c_green = (0, 255, 0)
 c_mint = (175, 255, 127)
 c_orange = (0, 127, 255)
+c_blue = (255, 0, 0)
 
 
 class OptimizableImage:
@@ -230,17 +231,17 @@ def visualize_intersections(images, affines, pair_indices, shapes, names=None):
 
 
 def visualize_intersection_differences(images, affines, affines_new, pair_indices, shapes, names=None):
-    metric = L1()
+    metric = L2()
     images1, images2 = images[pair_indices[:, 0]], images[pair_indices[:, 1]]
     shapes1, shapes2 = shapes[pair_indices[:, 0]], shapes[pair_indices[:, 1]]
 
-    sample_coords_scanner_space = compute_intersection_sampling_line(affines, pair_indices, shapes)
+    sample_coords_scanner_space = compute_intersection_sampling_line(affines, pair_indices, shapes, sampling_step_mm=2)
     affines1, affines2 = affines[pair_indices[:, 0]], affines[pair_indices[:, 1]]
     sampled_im1, sample_mask1, line_im1 = sample_image_along_scanner_line(sample_coords_scanner_space, images1, affines1, shapes1)
     sampled_im2, sample_mask2, line_im2 = sample_image_along_scanner_line(sample_coords_scanner_space, images2, affines2, shapes2)
     loss = metric(sampled_im1, sampled_im2, mask1=sample_mask1, mask2=sample_mask2)
 
-    sample_coords_scanner_space = compute_intersection_sampling_line(affines_new, pair_indices, shapes)
+    sample_coords_scanner_space = compute_intersection_sampling_line(affines_new, pair_indices, shapes, sampling_step_mm=2)
     affines1_new, affines2_new = affines_new[pair_indices[:, 0]], affines_new[pair_indices[:, 1]]
     sampled_im1_new, sample_mask1_new, line_im1_new = sample_image_along_scanner_line(sample_coords_scanner_space, images1, affines1_new, shapes1)
     sampled_im2_new, sample_mask2_new, line_im2_new = sample_image_along_scanner_line(sample_coords_scanner_space, images2, affines2_new, shapes2)
@@ -276,7 +277,7 @@ def visualize_intersection_differences(images, affines, affines_new, pair_indice
         im2_vis_rgb = np.stack([im2_vis]*3, axis=-1)
         mask = np.logical_and(sample_mask1[i, ..., 0], sample_mask2[i, ..., 0]).astype(np.float32)
         mask_rgb = np.stack([mask]*3, -1)
-        mask_rgb = np.where(mask_rgb, np.array([c_mint]*mask.shape[0]), np.array([c_orange]*mask.shape[0]))
+        mask_rgb = np.where(mask_rgb, np.array([c_red]*mask.shape[0]), np.array([c_red]*mask.shape[0]))
         # New
         im1_vis_new = normalize_image_with_mean_lv_value(sampled_im1_new[i, ..., 0]) * 255
         im1_vis_new_rgb = np.stack([im1_vis_new] * 3, axis=-1)
@@ -284,7 +285,7 @@ def visualize_intersection_differences(images, affines, affines_new, pair_indice
         im2_vis_new_rgb = np.stack([im2_vis_new] * 3, axis=-1)
         mask_new = np.logical_and(sample_mask1_new[i, ..., 0], sample_mask2_new[i, ..., 0]).astype(np.float32)
         mask_new_rgb = np.stack([mask_new]*3, -1)
-        mask_new_rgb = np.where(mask_new_rgb, np.array([c_green]*mask.shape[0]), np.array([c_red]*mask.shape[0]))
+        mask_new_rgb = np.where(mask_new_rgb, np.array([c_green]*mask.shape[0]), np.array([c_green]*mask.shape[0]))
 
         cat_line = np.stack((*[im1_vis_rgb]*2,
                              np.zeros_like(mask_rgb), mask_rgb, np.zeros_like(mask_rgb),
@@ -294,56 +295,70 @@ def visualize_intersection_differences(images, affines, affines_new, pair_indice
                              np.zeros_like(mask_new_rgb), mask_new_rgb, np.zeros_like(mask_new_rgb),
                              *[im2_vis_new_rgb]*2,), axis=0)
         cat_line_ = cv2.UMat(cat_line.astype(np.uint8))
-        cat_line_ = cv2.resize(cat_line_, (im1_vis.shape[0] * scaling, cat_line.shape[0] * scaling))
+        cat_line_ = cv2.resize(cat_line_, (im1_vis.shape[0] * scaling, cat_line.shape[0] * scaling), interpolation=0)
         cv2.imshow(f"{name1}-{name2} sampling line.   "
                    f"Original loss (top):  {float('%.5f' % loss[i])},   "
                    f"New loss (bottom):  {float('%.5f' % loss_new[i])}    "
                    f"Loss diff:  {float('%.5f' % (loss_new[i] - loss[i]))}", cat_line_)
 
         # Plot images and draw sampling lines along images
-        scaling = 2
+        scaling = 10
         im1_vis = images[idx1, ..., 0]
         im2_vis = images[idx2, ..., 0]
-        im_vis = np.concatenate((im1_vis, im2_vis), axis=1)
+        pad = np.zeros((im1_vis.shape[0], im1_vis.shape[1]//4))
+        im_vis = np.concatenate((im1_vis, pad, im2_vis), axis=1)
         im_vis = normalize_image(im_vis) * 255
-        im_vis = np.concatenate((im_vis, im_vis), axis=0)
+        # im_vis = np.concatenate((im_vis, im_vis), axis=0)
         im_vis_ = cv2.UMat(np.stack([im_vis.astype(np.uint8)]*3, axis=-1))
+        im_vis_ = cv2.resize(im_vis_, (im2_vis.shape[1] * scaling * 2 + pad.shape[1] * scaling, im2_vis.shape[0] * scaling))
 
         # Plot lines of old affines
         for j in range(line_im1.shape[1]-1):
-            p1 = line_im1[i, j, :2].round().astype(int)
-            p2 = line_im1[i, j+1, :2].round().astype(int)
-            c = c_mint if sample_mask1[i, j, 0] else c_orange
+            p1 = (line_im1[i, j, :2] * scaling).round().astype(int)
+            p2 = (line_im1[i, j+1, :2] * scaling).round().astype(int)
+            if p1[1] > (im1_vis.shape[1] * scaling) or p2[1] > (im1_vis.shape[1] * scaling):
+                continue
+            c = c_red if sample_mask1[i, j, 0] else c_red
             cv2.line(im_vis_,
                      (p1[1], p1[0],),
                      (p2[1], p2[0],),
-                     c)
+                     c,
+                     thickness=3)
         for j in range(line_im2.shape[1]-1):
-            p1 = line_im2[i, j, :2].round().astype(int)
-            p2 = line_im2[i, j+1, :2].round().astype(int)
-            c = c_mint if sample_mask1[i, j, 0] else c_orange
+            p1 = (line_im2[i, j, :2] * scaling).round().astype(int)
+            p2 = (line_im2[i, j+1, :2] * scaling).round().astype(int)
+            if p1[1] < 0 or p2[1] < 0:
+                continue
+            c = c_red if sample_mask1[i, j, 0] else c_red
             cv2.line(im_vis_,
-                     (p1[1] + images.shape[2], p1[0],),
-                     (p2[1] + images.shape[2], p2[0],),
-                     c)
+                     (p1[1] + images.shape[2] * scaling + pad.shape[1] * scaling, p1[0],),
+                     (p2[1] + images.shape[2] * scaling + pad.shape[1] * scaling, p2[0],),
+                     c,
+                     thickness=3)
         # Plot lines of new affines
         for j in range(line_im1_new.shape[1]-1):
-            p1 = line_im1_new[i, j, :2].round().astype(int)
-            p2 = line_im1_new[i, j+1, :2].round().astype(int)
-            c = c_green if sample_mask1[i, j, 0] else c_red
+            p1 = (line_im1_new[i, j, :2] * scaling).round().astype(int)
+            p2 = (line_im1_new[i, j+1, :2] * scaling).round().astype(int)
+            if p1[1] > (im1_vis.shape[1] * scaling) or p2[1] > (im1_vis.shape[1] * scaling):
+                continue
+            c = c_green if sample_mask1[i, j, 0] else c_green
             cv2.line(im_vis_,
-                     (p1[1], p1[0] + images.shape[1],),
-                     (p2[1], p2[0] + images.shape[1],),
-                     c)
+                     (p1[1], p1[0],),
+                     (p2[1], p2[0],),
+                     c,
+                     thickness=3)
         for j in range(line_im2_new.shape[1]-1):
-            p1 = line_im2_new[i, j, :2].round().astype(int)
-            p2 = line_im2_new[i, j+1, :2].round().astype(int)
-            c = c_green if sample_mask1[i, j, 0] else c_red
+            p1 = (line_im2_new[i, j, :2] * scaling).round().astype(int)
+            p2 = (line_im2_new[i, j+1, :2] * scaling).round().astype(int)
+            if p1[1] < 0 or p2[1] < 0:
+                continue
+            c = c_green if sample_mask1[i, j, 0] else c_green
             cv2.line(im_vis_,
-                     (p1[1] + images.shape[2], p1[0] + images.shape[1],),
-                     (p2[1] + images.shape[2], p2[0] + images.shape[1],),
-                     c)
-        im_vis_ = cv2.resize(im_vis_, (im2_vis.shape[1] * scaling * 2, im2_vis.shape[0] * scaling * 2))
+                     (p1[1] + images.shape[2] * scaling + pad.shape[1] * scaling, p1[0],),
+                     (p2[1] + images.shape[2] * scaling + pad.shape[1] * scaling, p2[0],),
+                     c,
+                     thickness=3)
+        im_vis_ = cv2.resize(im_vis_, (im2_vis.shape[0] * scaling * 2, im2_vis.shape[0] * scaling))
         cv2.imshow(f"{name1}-{name2} intersection.  "
                    f"Original loss (top):  {float('%.5f' % loss[i])},   "
                    f"New loss (bottom):  {float('%.5f' % loss_new[i])}", im_vis_)
