@@ -3,6 +3,7 @@ from typing import Union, Optional, Tuple, List, Dict
 
 import cv2
 import numpy as np
+import scipy
 import skimage
 import torch
 import torch.nn.functional as F
@@ -483,7 +484,6 @@ def nlm_denoise_multi_parallel(
     return frames_dn
 
 
-
 def to_gif(imgs, dir_name, name="arr"):
     from PIL import Image
     name = Path(dir_name) / name
@@ -712,3 +712,85 @@ def draw_3d_vectors_on_image(
                         thickness=int(round(arrow_thickness*upscale_factor)), tipLength=arrow_head_length*upscale_factor)
     overlay = cv2.resize(overlay, (overlay.shape[0]//upscale_factor, overlay.shape[1]//upscale_factor), interpolation=cv2.INTER_LINEAR)
     return overlay
+
+
+def extract_2dt_contours(segmentation_volume, class_ids=(1,2,3), min_area=10, resolution_factor=5):
+    """
+    Extracts smoothed, hierarchical contours from a 2D+t segmentation volume.
+
+    Parameters:
+    - segmentation_volume: 3D numpy array (Height, Width, Time).
+    - class_ids: List of integers (e.g., [1, 2, 3]).
+                 Hierarchy: Class N includes all classes <= N (excluding 0).
+    - min_area: Minimum pixel area to keep a component.
+    - resolution_factor: Multiplier for the number of points in the smoothed contour.
+                         Higher = smoother, more high-res line.
+
+    Returns:
+    - results: Dict structure: results[frame_idx][class_id] = (N, 2) numpy array
+    """
+    results = []
+    H, W, T = segmentation_volume.shape
+
+    for t in range(T):
+        frame = segmentation_volume[:, :, t]
+        results.append([])
+        for c_id in class_ids:
+            # --- 1. Hierarchical Mask Creation ---
+            # "Class 2 is union of 1+2", etc.
+            # We select all pixels > 0 and <= current_class_id
+            binary_mask = (frame > 0) & (frame <= c_id)
+
+            # --- 2. Keep Largest Component ---
+            labeled = skimage.measure.label(binary_mask)
+            if labeled.max() == 0:
+                results[t].append([])
+                continue
+            regions = skimage.measure.regionprops(labeled)
+            largest = max(regions, key=lambda r: r.area)
+            if largest.area < min_area:
+                results[t].append([])
+                continue
+            # Isolate the component
+            component_mask = (labeled == largest.label).astype(float)
+
+            # --- 3. Marching Squares ---
+            # Returns list of (row, col) coordinates
+            contours = skimage.measure.find_contours(component_mask, level=0.5)
+            # Handle topological anomalies (holes/islands) by taking the longest
+            if not contours:
+                results[t].append([])
+                continue
+            raw_contour = max(contours, key=len)
+
+            # --- 4. B-Spline Smoothing & Upsampling ---
+            # We use splprep (parametric B-spline) for curve smoothing
+            # Check if we have enough points to fit a spline (need > k=3)
+            if len(raw_contour) > 3:
+                # Transpose to shape (2, N) for splprep
+                y_coords = raw_contour[:, 0]
+                x_coords = raw_contour[:, 1]
+
+                # tck: tuple (knots, coefficients, degree)
+                # u: parameter values
+                # s: smoothing factor. Higher s = smoother. s=0 = strict interpolation.
+                # per=True: Closed curve
+                try:
+                    tck, u = scipy.interpolate.splprep([y_coords, x_coords], s=2.0, per=True)
+
+                    # Generate new points
+                    # We create a new linspace with MORE points than original
+                    u_new = np.linspace(u.min(), u.max(), len(raw_contour) * resolution_factor)
+                    y_new, x_new = scipy.interpolate.splev(u_new, tck, der=0)
+
+                    # Stack back to (N, 2)
+                    smooth_contour = np.column_stack((y_new, x_new))
+                    results[t].append(smooth_contour)
+                except Exception as e:
+                    # Fallback if spline fitting fails (e.g. self-intersecting or too small)
+                    results[t].append(raw_contour)
+            else:
+                results[t].append(raw_contour)
+        assert len(results[t]) == len(class_ids)
+    assert len(results) == 50
+    return results

@@ -18,11 +18,11 @@ from data_utils import array_to_nifti
 from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBValidation, CardiacUKBBFullImage
 from normalization_utils import crop_around_heart, normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
-from utils import normalize_image_with_percentile, mat_to_params, \
-    compute_3d_image_gradients, to_gif, nlm_denoise_multi_parallel
+from utils import normalize_image_with_percentile, mat_to_params, extract_2dt_contours
 
 UNCERTAIN, AUTO, HAND_ANNOTATED = 'uncertain', 'auto', 'hand_annotated'
 PREPR_FILE_NAME = "prep_data.h5"
+
 
 class CMRDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -350,6 +350,8 @@ class CMRDataModule(pl.LightningDataModule):
                     print(subject_id)
                     raise e
 
+                contours = [extract_2dt_contours(s, min_area=8, resolution_factor=5) for s in segs]
+
                 flippings = []
                 aff_params = []
                 coord_max = []
@@ -370,33 +372,7 @@ class CMRDataModule(pl.LightningDataModule):
                     coord_max.append(torch.amax(coordinates_arr, dim=0))
                     coord_min.append(torch.amin(coordinates_arr, dim=0))
 
-                # Denoise images
-                denoised_images = [nlm_denoise_multi_parallel(i, 27, 1, template_window_size=5,search_window_size=7, num_processes=16) for i in images]
-                # Compute Jacobians and Hessians
-                image_ds = [compute_3d_image_gradients(i[None, None])[0] for i in denoised_images]
-                image_dds = [torch.cat((compute_3d_image_gradients(i[None,0:1])[0][0:3],  # (dxx, dxy, dxz,)
-                                        compute_3d_image_gradients(i[None,1:2])[0][1:3],  # (dyy, dyz,)
-                                        compute_3d_image_gradients(i[None,2:3])[0][2:3]), # (dzz,)
-                                       dim=0) for i in image_ds]  # (dxx, dxy, dxz, dyy, dyz, dzz)
-                image_ds = [i.moveaxis(0, -1) for i in image_ds]
-                image_dds = [i.moveaxis(0, -1) for i in image_dds]
-                if debug:
-                    for idx, (raw_im) in enumerate(zip(images)):
-                        a = [raw_im,
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=3, search_window_size=7, num_processes=16),
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=3, search_window_size=15,num_processes=16),
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=4, search_window_size=7, num_processes=16),
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=4, search_window_size=15, num_processes=16),
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=5, search_window_size=7, num_processes=16),
-                             nlm_denoise_multi_parallel(raw_im, 49, 1, template_window_size=5, search_window_size=15, num_processes=16),
-                             ]
-                        b = [compute_3d_image_gradients(i[None, None])[0, -1] for i in a]
-                        c = [compute_3d_image_gradients(i[None, None])[0, -1] for i in b]
-                        to_gif(torch.cat((torch.cat(a, 0), torch.cat([i * 50 for i in b], 0).abs(),
-                                          torch.cat([i * 50 for i in c], 0).abs()), 1),
-                               dir_name='debug_denoise', name=str(idx))
                 # Convert images to uin8
-                images = denoised_images
                 images = [(i * 255).round().to(torch.uint8) for i in images]
 
                 dim_max = np.array([i.shape for i in images]).max(0)
@@ -407,11 +383,6 @@ class CMRDataModule(pl.LightningDataModule):
                     im_pad[i, :im.shape[0], :im.shape[1]] = im.squeeze()
                     im_pad_mask[i, :im.shape[0], :im.shape[1]] = True
                 # non_padding_indices = make_masked_coordinate_tensor(im_pad_mask)
-                img_d_pad = torch.zeros((len(images), *dim_max, 3), dtype=torch.float32)
-                img_dd_pad = torch.zeros((len(images), *dim_max, 6), dtype=torch.float32)
-                for i, (d, dd) in enumerate(zip(image_ds, image_dds)):
-                    img_d_pad[i, :d.shape[0], :d.shape[1]] = d.squeeze()
-                    img_dd_pad[i, :dd.shape[0], :dd.shape[1]] = dd.squeeze()
                 seg_pad = torch.zeros((len(images), *dim_max), dtype=torch.uint8)
                 for i, seg in enumerate(segs):
                     seg_pad[i, :seg.shape[0], :seg.shape[1]] = seg.squeeze()
@@ -447,9 +418,7 @@ class CMRDataModule(pl.LightningDataModule):
                 while not save_path.exists() or save_path.stat().st_size < 100:
                     with h5py.File(save_path, 'w') as f:
                         f.create_dataset('image_padded', data=im_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)  # Saving volume as (time, slices, H, W) for faster frame lazy loading
-                        f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)
-                        f.create_dataset('image_d_padded', data=img_d_pad.moveaxis(-1, 0).moveaxis(-1, 0).numpy(), dtype=np.float32, compression=1)  # Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
-                        f.create_dataset('image_dd_padded', data=img_dd_pad.moveaxis(-1, 0).moveaxis(-1, 0).numpy(), dtype=np.float32, compression=1)  # Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
+                        f.create_dataset('image_padded_mask', data=im_pad_mask.moveaxis(-1, 0).numpy(), compression=1)# Saving volume as (time, ch, slices, H, W) for faster frame lazy loading
                         f.create_dataset('seg_padded', data=seg_pad.moveaxis(-1, 0).numpy(), dtype=np.uint8, compression=1)
                         f.create_dataset('gt_available_padded', data=gt_available_pad.moveaxis(-1, 0).numpy(), compression=1)
                         f.create_dataset('coord_max', data=subj_coord_max.numpy(), compression=1)
@@ -457,6 +426,14 @@ class CMRDataModule(pl.LightningDataModule):
                         f.create_dataset('aff_params_padded', data=aff_params_padded.numpy(), compression=1)
                         f.create_dataset('spacings_padded', data=spacings_padded.numpy(), compression=1)
                         f.create_dataset('flippings_padded', data=needs_flip_padded.numpy(), compression=1)
+                        g = f.create_group('contours')
+                        for slice_idx, slice_contours in enumerate(contours):
+                            h = g.create_group(f'{slice_idx:02d}')
+                            for frame_idx, frame_contours in enumerate(slice_contours):
+                                k = h.create_group(f'{frame_idx:02d}')
+                                for label_idx, label_contour in enumerate(frame_contours):
+                                    k.create_dataset(f'{label_idx}', data=label_contour, compression=1, dtype=float)
+
                 prepr_data_paths.append(str(save_path))
             except AssertionError as e:
                 print(f'Encountered {e}: ',  traceback.print_exc())
