@@ -369,7 +369,7 @@ class INR_AutoReg(pl.LightningModule):
             latent_params, aff_def_params,
             self.point_spread_size_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size_after,
             self.point_spread_std_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_std_after,
-            return_deriv=True,
+            return_deriv=self.supervise_seg,
             reduction=False)
         values_pred = values_pred_.mean(2)  # Reduce PSF dimension
         # Apply learnt intensity scaling to each slice
