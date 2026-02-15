@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, Dict
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -9,10 +9,11 @@ from utils import make_masked_coordinate_tensor, to_1hot, make_coordinate_tensor
 
 
 class CardiacUKBB(Dataset):
-    def __init__(self, subject_data_paths, max_slices, max_slice_shape, num_coords=4000, **kwargs):
+    def __init__(self, subject_data_paths, max_slices, max_slice_shape, num_coords_voxel=30000, num_coords_surface=10000, **kwargs):
         super().__init__()
         self.data_paths = subject_data_paths
-        self.num_coords = num_coords
+        self.num_coords = num_coords_voxel
+        self.num_coords_contour = num_coords_surface
         self.max_slices = max_slices
         self.max_slice_shape = max_slice_shape
         self.coord_size = None
@@ -27,7 +28,8 @@ class CardiacUKBB(Dataset):
         return len(self.data_paths)
 
     def load_subject_data(self, subj_idx: int, frame_idx: Optional[int] = None, **kwargs) \
-            -> Tuple[torch.Tensor, ...]:
+            -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Dict[int, List[List[torch.Tensor]]]]:
         """Load image and segmentation files and undersample them according to hold-out rates.
         :param subj_idx: Index of subject in dataset list.
         """
@@ -43,9 +45,10 @@ class CardiacUKBB(Dataset):
             # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
             image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
             seg = torch.zeros_like(image, dtype=torch.bool)
-            # seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
+            seg = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
             la_gt_available = torch.ones_like(seg, dtype=torch.bool)
-            # la_gt_available[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
+            la_gt_available[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
+
             # Get available non-padding indices in frame
             non_padding_indices = make_masked_coordinate_tensor(image_mask)
             # Add the time index to get the full volume index
@@ -62,22 +65,41 @@ class CardiacUKBB(Dataset):
             spacings_padded[:S] = torch.tensor(f['spacings_padded'][:], dtype=torch.float32)
             flippings_padded = torch.zeros((self.max_slices,), dtype=torch.bool)
             flippings_padded[:S] = torch.tensor(f['flippings_padded'][:], dtype=torch.bool)
+            slice_num = torch.tensor((S,), dtype=torch.long)
+
+            # Load contours for each class
+            contour_per_class = {1: [[] for _ in range(S)],
+                                 2: [[] for _ in range(S)],
+                                 3: [[] for _ in range(S)]}
+            for class_idx in contour_per_class.keys():
+                for s in range(S):
+                    # Stored as 'contours' -> 'slice' -> 'frame' -> 'class' -> 'coordinates'
+                    d = f['contours'][f'{s:02d}'][f'{selected_frame:02d}'][f'{class_idx:02d}']
+                    for c_idx in d.keys():
+                        c = torch.tensor(d[c_idx], dtype=torch.float32)
+                        # full indices (slice, x, y, t)
+                        c = torch.cat((torch.full((c.shape[0], 1), s), c,
+                                       torch.full((c.shape[0], 1), selected_frame)), dim=1)
+                        contour_per_class[class_idx][s].append(c)
         return image, seg, la_gt_available, full_indices, coord_min, coord_max, \
-            aff_params_padded, spacings_padded, flippings_padded, torch.tensor((S,), dtype=torch.long)
+            aff_params_padded, spacings_padded, flippings_padded, slice_num, contour_per_class
 
     def __getitem__(self, idx: int):
         return self.generate_item(idx)
 
     def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
         # Load image and seg data
-        img, seg, gt_avail, non_padding_indices, min_coords, max_coords, \
-            aff_params_padded, spacings_padded, needs_flip_padded, num_subj_slices = self.load_subject_data(idx, frame)
+        (img, _, _, non_padding_indices, min_coords, max_coords, aff_params_padded, spacings_padded, needs_flip_padded,
+         num_subj_slices, contours) = self.load_subject_data(idx, frame)
 
         if num_coords is None:
             num_coords = self.num_coords
+            num_coords_contour = self.num_coords_contour
         elif isinstance(num_coords, float):
-            num_coords = num_coords * torch.prod(img.shape)
+            num_coords = int(num_coords * torch.prod(img.shape))
+            num_coords_contour = int(num_coords * torch.prod(img.shape) * 0.2)
         else:
+            num_coords_contour = int(num_coords * 0.2)
             pass  # num_coord is already an int
         # Sample num_coords amount of indices that our batch will consist of
         indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
@@ -87,18 +109,43 @@ class CardiacUKBB(Dataset):
         # Get image values at the indices samples
         image_values_sample = img[tuple(indices.T[:-1])]
         # image_ddt_values_sample = img_ddt[tuple(indices.T[:-1])]
-        seg_sample = seg[tuple(indices.T[:-1])]
-        seg_sample = to_1hot(seg_sample, num_class=4)
-        gt_avail_sample = gt_avail[tuple(indices.T[:-1])]
+        # seg_sample = seg[tuple(indices.T[:-1])]
+        # seg_sample = to_1hot(seg_sample, num_class=4)
+        # gt_avail_sample = gt_avail[tuple(indices.T[:-1])]
 
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = torch.concatenate((indices[:, 1:-1], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
-
         sub_idx = torch.tensor(idx, dtype=torch.long)
-        return (voxel_indices, image_values_sample,
-                seg_sample, gt_avail_sample, aff_params_padded, spacings_padded, needs_flip_padded,
-                sub_idx, slice_indices, min_coords, max_coords, num_subj_slices)
+
+        # Contours
+        surface_points_per_class = []
+        for k, frame_contours in contours.items():
+            slice_surf_points = []
+            for slice_idx, slice_contours in enumerate(frame_contours):
+                if slice_contours:
+                    merged_points = torch.cat(slice_contours, dim=0)
+                else:
+                    merged_points = torch.zeros((0, voxel_indices.shape[-1]), dtype=torch.float32)
+                slice_surf_points.append(merged_points)
+            surface_points = torch.cat(slice_surf_points, dim=0)
+            contour_sample = torch.randint(0, surface_points.shape[0], (num_coords_contour,))
+            surface_points_sample = surface_points[contour_sample]
+            surface_points_per_class.append(surface_points_sample)
+        surface_points_per_class = torch.stack(surface_points_per_class, dim=-2)
+        surface_points_slice_idx = surface_points_per_class[..., :1].long()
+        surface_points_slice_idx_ = surface_points_slice_idx.reshape(-1, 1)
+        # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
+        surface_coords_per_class = torch.cat((surface_points_per_class[..., 1:-1],
+                                              torch.zeros_like(surface_points_per_class[..., :1]),
+                                              surface_points_per_class[..., -1:]), dim=-1)
+        surface_coords_per_class_ = surface_coords_per_class.reshape(-1, surface_coords_per_class.shape[-1])
+        surface_points_class = torch.arange(0, len(contours.keys()))[None, :].tile(surface_points_per_class.shape[0], 1)
+        surface_points_class_ = surface_points_class.reshape(-1, 1).long()
+
+        return (voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded,
+                sub_idx, slice_indices, min_coords, max_coords, num_subj_slices,
+                surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_)
 
 
 class CardiacUKBBValidation(CardiacUKBB):

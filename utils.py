@@ -714,12 +714,35 @@ def draw_3d_vectors_on_image(
     return overlay
 
 
-def extract_2dt_contours(segmentation_volume, class_ids=(1,2,3), min_area=10, resolution_factor=5):
+def is_LV_bloodpool_enclosed(segmentation_map):
+    """
+    Detects if the LV blood pool class is fully surrounded by LV myocardium class by checking if Class 1 touches Class 2.
+    """
+    # Create masks
+    inner_mask = (segmentation_map == 1)
+    background_mask = np.bitwise_or(segmentation_map == 0, segmentation_map > 2)
+
+    # Dilate the inner object by 1 pixel to find its immediate neighbors
+    # Using a 3x3 structure ensures we check 8-connected neighbors (diagonals included)
+    dilation_structure = np.ones((3, 3), dtype=bool)
+    dilated_inner = scipy.ndimage.binary_dilation(inner_mask, structure=dilation_structure)
+
+    # The 'boundary' is the area added by dilation (excluding the original inner object)
+    boundary_region = dilated_inner & ~inner_mask
+
+    # Check if any pixel in this boundary region is Background (0)
+    # If the overlap is not empty, the background is touching the inner object
+    is_touching_background = np.any(background_mask & boundary_region)
+
+    return ~is_touching_background
+
+
+def extract_2dt_contours(segmentation_slices, class_ids=(1, 2, 3), min_area=10, resolution_factor=5):
     """
     Extracts smoothed, hierarchical contours from a 2D+t segmentation volume.
 
     Parameters:
-    - segmentation_volume: 3D numpy array (Height, Width, Time).
+    - segmentation_slices: List of 3D numpy arrays (Height, Width, Time).
     - class_ids: List of integers (e.g., [1, 2, 3]).
                  Hierarchy: Class N includes all classes <= N (excluding 0).
     - min_area: Minimum pixel area to keep a component.
@@ -727,70 +750,177 @@ def extract_2dt_contours(segmentation_volume, class_ids=(1,2,3), min_area=10, re
                          Higher = smoother, more high-res line.
 
     Returns:
-    - results: Dict structure: results[frame_idx][class_id] = (N, 2) numpy array
+    - results: results[slice_idx][frame_idx][class_id] = List of 2D(N, 2) numpy array of len 0, 1, or 2 contours.
     """
     results = []
-    H, W, T = segmentation_volume.shape
+    slice_type = 'LA'
+    for i, seg in enumerate(segmentation_slices):
+        seg = seg.numpy()
+        # Determine slice type
+        if i == 3:
+            slice_type = 'basal'
+        elif slice_type == 'basal':
+            prev_seg = segmentation_slices[i-1][..., 25].numpy()
+            if np.any(prev_seg) and is_LV_bloodpool_enclosed(prev_seg):
+                slice_type = 'midventricular'
+        elif slice_type == 'midventricular':
+            if i >= (len(segmentation_slices) - 1) - 3:  # If within the last 3 slices
+                slice_type = 'apical'
 
-    for t in range(T):
-        frame = segmentation_volume[:, :, t]
-        results.append([])
-        for c_id in class_ids:
-            # --- 1. Hierarchical Mask Creation ---
-            # "Class 2 is union of 1+2", etc.
-            # We select all pixels > 0 and <= current_class_id
-            binary_mask = (frame > 0) & (frame <= c_id)
+        # Process segmentation slice into contour(s)
+        results_slice = []
+        H, W, T = seg.shape
+        for t in range(T):
+            frame = seg[:, :, t]
+            results_slice.append({k: [] for k in class_ids})
+            if slice_type in {'midventricular', 'apical'}:
+                if np.any(seg[..., t] == 1) and not is_LV_bloodpool_enclosed(seg[..., t]):
+                    continue  # If LV BP is not fully enclosed, assume incorrect annotation and take no training samples
+            for c_id in class_ids:
+                # --- 1. Hierarchical Mask Creation ---
+                # "Class 2 is union of 1+2", etc.
+                # We select all pixels > 0 and <= current_class_id
+                binary_mask = (frame > 0) & (frame <= c_id)
 
-            # --- 2. Keep Largest Component ---
-            labeled = skimage.measure.label(binary_mask)
-            if labeled.max() == 0:
-                results[t].append([])
-                continue
-            regions = skimage.measure.regionprops(labeled)
-            largest = max(regions, key=lambda r: r.area)
-            if largest.area < min_area:
-                results[t].append([])
-                continue
-            # Isolate the component
-            component_mask = (labeled == largest.label).astype(float)
+                # --- 2. Keep Largest Component(s) ---
+                labeled = skimage.measure.label(binary_mask)
+                if labeled.max() == 0:
+                    continue
+                regions = skimage.measure.regionprops(labeled)
+                # Make sure there are regions larger than the threshold
+                regions = [r for r in regions if r.area > min_area]
+                if len(regions) == 0:
+                    continue
+                # Pick largest regions
+                regions = sorted(regions, key=lambda r: r.area, reverse=True)
+                if slice_type == 'LA':
+                    if len(regions) > 1:
+                        # Should only ever have 1 region. If multiple, assume incorrect annotation and take no training samples
+                        continue
+                    selected_regions = regions[:1]  # Select only largest
+                elif slice_type == 'basal':
+                    if c_id < 3:
+                        selected_regions = regions[:1]  # Select only largest
+                    else:
+                        selected_regions = regions[:2]  # Only allow RV to have multiple regions
+                elif slice_type == 'midventricular':
+                    if len(regions) > 1:
+                        continue  # Should only ever have 1 region. If multiple, assume incorrect annotation and take no training samples
+                    selected_regions = regions[:1]  # Select only largest
+                elif slice_type == 'apical':
+                    if c_id < 3:
+                        selected_regions = regions[:1]  # Select only largest
+                    else:
+                        selected_regions = regions[:2]  # Only allow RV to have multiple regions
+                else:
+                    raise NotImplementedError
 
-            # --- 3. Marching Squares ---
-            # Returns list of (row, col) coordinates
-            contours = skimage.measure.find_contours(component_mask, level=0.5)
-            # Handle topological anomalies (holes/islands) by taking the longest
-            if not contours:
-                results[t].append([])
-                continue
-            raw_contour = max(contours, key=len)
+                # There will always be 1 or 2 regions
+                for c in selected_regions:
+                    # Isolate the component
+                    component_mask = (labeled == c.label).astype(float)
 
-            # --- 4. B-Spline Smoothing & Upsampling ---
-            # We use splprep (parametric B-spline) for curve smoothing
-            # Check if we have enough points to fit a spline (need > k=3)
-            if len(raw_contour) > 3:
-                # Transpose to shape (2, N) for splprep
-                y_coords = raw_contour[:, 0]
-                x_coords = raw_contour[:, 1]
+                    # --- 3. Marching Squares ---
+                    # Returns list of (row, col) coordinates
+                    contours = skimage.measure.find_contours(component_mask, level=0.5)
+                    # Handle topological anomalies (holes/islands) by taking the longest
+                    if not contours:
+                        continue
+                    raw_contour = max(contours, key=len)
 
-                # tck: tuple (knots, coefficients, degree)
-                # u: parameter values
-                # s: smoothing factor. Higher s = smoother. s=0 = strict interpolation.
-                # per=True: Closed curve
-                try:
-                    tck, u = scipy.interpolate.splprep([y_coords, x_coords], s=2.0, per=True)
+                    # --- 4. B-Spline Smoothing & Upsampling ---
+                    # We use splprep (parametric B-spline) for curve smoothing
+                    # Check if we have enough points to fit a spline (need > k=3)
+                    if len(raw_contour) > 3:
+                        # Transpose to shape (2, N) for splprep
+                        y_coords = raw_contour[:, 0]
+                        x_coords = raw_contour[:, 1]
 
-                    # Generate new points
-                    # We create a new linspace with MORE points than original
-                    u_new = np.linspace(u.min(), u.max(), len(raw_contour) * resolution_factor)
-                    y_new, x_new = scipy.interpolate.splev(u_new, tck, der=0)
+                        # tck: tuple (knots, coefficients, degree)
+                        # u: parameter values
+                        # s: smoothing factor. Higher s = smoother. s=0 = strict interpolation.
+                        # per=True: Closed curve
+                        try:
+                            tck, u = scipy.interpolate.splprep([y_coords, x_coords], s=2.0, per=True)
 
-                    # Stack back to (N, 2)
-                    smooth_contour = np.column_stack((y_new, x_new))
-                    results[t].append(smooth_contour)
-                except Exception as e:
-                    # Fallback if spline fitting fails (e.g. self-intersecting or too small)
-                    results[t].append(raw_contour)
-            else:
-                results[t].append(raw_contour)
-        assert len(results[t]) == len(class_ids)
-    assert len(results) == 50
+                            # Generate new points
+                            # We create a new linspace with MORE points than original
+                            u_new = np.linspace(u.min(), u.max(), len(raw_contour) * resolution_factor)
+                            y_new, x_new = scipy.interpolate.splev(u_new, tck, der=0)
+
+                            # Stack back to (N, 2)
+                            smooth_contour = np.column_stack((y_new, x_new))
+                            results_slice[t][c_id].append(smooth_contour)
+                        except (KeyError, IndexError) as e:
+                            raise e
+                        except Exception as e:
+                            # Fallback if spline fitting fails (e.g. self-intersecting or too small)
+                            results_slice[t][c_id].append(raw_contour)
+                    else:
+                        results_slice[t][c_id].append(raw_contour)
+        results.append(results_slice)
+    if len(results) != len(segmentation_slices):
+        raise ValueError('There should be as many results as slices')
+    if any(len(r) != 50 for r in results):
+        raise ValueError('There should be 50 frames')
+    if any(any(len(c) != len(class_ids) for c in r) for r in results):
+        raise ValueError('There should as many contour classes as number of classes')
     return results
+
+
+def equalize_sdf_hierarchies(sdf: torch.Tensor) -> torch.Tensor:
+    num_classes = sdf.shape[-1]
+    new_sdf = sdf.clone()
+    for c in range(1, num_classes):
+        new_sdf[..., c] = torch.amin(new_sdf[..., c-1:c], dim=-1)
+    return new_sdf
+
+
+def sdf_hierarchy_to_seg(sdf):
+    """ Given a tensor of SDF grids, convert them to segmentations. We assume these SDFs are defined as a hierarchy.
+    Ie. the segmentation class #2 is defined as ((SDF_2 <= 0) & ~(SDF_1 <= 0)) """
+    *spatial_dims, num_classes = sdf.shape
+    sdf = equalize_sdf_hierarchies(sdf)
+    seg = torch.zeros((*spatial_dims, num_classes+1), dtype=torch.bool, device=sdf.device)
+    for c in range(0, num_classes+1):
+        if c == 0:
+            seg[..., c] = sdf[..., -1] > 0
+        elif c == 1:
+            seg[..., c] = sdf[..., 0] <= 0
+        else:
+            seg[..., c] = (sdf[..., c-1] <= 0) & (sdf[..., c-2] > 0)
+    return seg
+
+
+def keep_last_true(segmentations):
+    """
+    Given a boolean tensor of shape (*spatial_dims, num_classes),
+    keep only the last True value along the class dimension for each spatial location.
+
+    Args:
+        segmentations: torch.Tensor of shape (*spatial_dims, num_classes) with dtype bool
+
+    Returns:
+        torch.Tensor of same shape where only the last True per spatial location remains True
+    """
+    # Flip along the class dimension (last axis)
+    reversed_seg = torch.flip(segmentations, dims=[-1])
+    last_true_idx_reversed = torch.argmax(reversed_seg.to(torch.long), dim=-1)
+    has_true = torch.any(reversed_seg, dim=-1)
+
+    # Convert back to original indexing
+    num_classes = segmentations.shape[-1]
+    last_true_idx = num_classes - 1 - last_true_idx_reversed
+
+    # Create output tensor
+    result = torch.zeros_like(segmentations)
+    spatial_shape = segmentations.shape[:-1]
+    spatial_indices = torch.meshgrid(
+        *[torch.arange(s, device=segmentations.device) for s in spatial_shape],
+        indexing='ij'
+    )
+    # Set only the last True for each spatial location
+    mask_indices = tuple(idx[has_true] for idx in spatial_indices)
+    result[mask_indices + (last_true_idx[has_true],)] = True
+
+    return result

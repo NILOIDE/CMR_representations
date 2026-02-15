@@ -15,7 +15,6 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 from dataloader import CMRDataModule
 from model_autoreg import INR_AutoReg
-from model_conv import INR_Conv
 
 
 @dataclass
@@ -28,30 +27,28 @@ class Params:
     replace_existing_preprocessed: bool = False
     logging_rate: int = 2_000
     logging_start_rate: int = 2_000
-    addit_log_epochs: Tuple[int, ...] = (500,1000,)
+    addit_log_epochs: Tuple[int, ...] = (100,500,1000,1500)
     num_train: int = 100
     num_val: int = 2
     num_test: int = 1
-    num_workers: int = 8
-    batch_size: int = 4
+    num_workers: int = 4
+    batch_size: int = 2
 
-    num_coords: int = 40_000
+    num_coords_voxel: int = 40_000
+    num_coords_surface: int = 10_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 0
+    point_spread_start_epoch: int = 1000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 20000
+    num_coords_during_point_spread: int = 10000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     hidden_size: int = 256
-    latent_size: int = 8
+    latent_size: int = 16
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
-    # Conv latent prediction -------------------------------------------------------------------
-    use_conv: bool = False
-    conv_channels: Tuple[int, ...] = (32,64,64,128,128)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_aff: float = 1e-4
@@ -59,15 +56,15 @@ class Params:
     weight_reg_int_scale: float = 1e-2
     weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 0e0
-    weight_seg_class: Tuple[float, float, float, float] = (1,2,4,3)  # Will be normalized
+    weight_loss_seg: float = 0e2
+    weight_seg_class: Tuple[float, float, float] = (4,4,3)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
     learning_rate_aff: float = 1e-4
     learning_rate_def: float = 1e-4
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
-    pe_anneal_max_iter: int = 10_000
+    pe_anneal_max_iter: int = 25_000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
@@ -117,17 +114,12 @@ def main():
                                 num_train=params.num_train,
                                 num_val=params.num_val,
                                 num_test=params.num_test,
-                                full_seq_dataset=params.use_conv,
                                 batch_size=params.batch_size,
-                                num_coords=params.num_coords,
+                                num_coords_voxel=params.num_coords_voxel,
+                                num_coords_surface=params.num_coords_surface,
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers)
     data_module.prepare_data()
-    os.environ['WANDB_DISABLED'] = str(params.logging_wandb_disabled)
-    logger = WandbLogger(project="CMR-Align")
-    logger.log_hyperparams(params.__dict__)
-    print('Params', params)
-    print('Model path:', model_path)
 
     checkpoint_path = model_path / 'checkpoints'
     checkpoint_path.mkdir(exist_ok=True)
@@ -137,14 +129,16 @@ def main():
                                           save_top_k=-1)
     log_path = model_path / 'logs'
     log_path.mkdir(exist_ok=True)
-    if params.use_conv:
-        model = INR_Conv(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                         max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
-                         log_path=log_path, **params.__dict__)
-    else:
-        model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                            max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
-                            log_path=log_path, **params.__dict__)
+    model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
+                        max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
+                        log_path=log_path, **params.__dict__)
+
+    os.environ['WANDB_DISABLED'] = str(params.logging_wandb_disabled)
+    logger = WandbLogger(project="CMR-Align")
+    logger.log_hyperparams(params.__dict__)
+    print('Params', params)
+    print('Model path:', model_path)
+
     if not params.inference:
         trainer = Trainer(
             logger=logger,

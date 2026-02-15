@@ -33,11 +33,11 @@ class CMRDataModule(pl.LightningDataModule):
                  num_train: int = 100,
                  num_val: int = 8,
                  num_test: int = 1,
-                 full_seq_dataset: bool = False,
                  replace_existing_preprocessed=False,
                  crop_around_heart=True,
                  batch_size: int = 32,
-                 num_coords: int = 4000,
+                 num_coords_voxel: int = 40000,
+                 num_coords_surface: int = 10000,
                  inf_num_coords: int = 4000,
                  num_workers: int = 0,):
         super().__init__()
@@ -45,12 +45,13 @@ class CMRDataModule(pl.LightningDataModule):
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
         self.log_path = log_path
-        self.train_dset_class = CardiacUKBBFullImage if full_seq_dataset else CardiacUKBB
-        self.test_dset_class = CardiacUKBBValidationFullImage if full_seq_dataset else CardiacUKBBValidation
+        self.train_dset_class = CardiacUKBB
+        self.test_dset_class = CardiacUKBBValidation
         self.crop_around_heart = crop_around_heart
         self.replace_existing_processed = replace_existing_preprocessed
         self.batch_size = batch_size
-        self.num_coords = num_coords
+        self.num_coords_voxel = num_coords_voxel
+        self.num_coords_surface = num_coords_surface
         self.inf_num_coords = inf_num_coords
         self.train_dset = None
         self.val_dset = None
@@ -87,8 +88,8 @@ class CMRDataModule(pl.LightningDataModule):
         train_paths = subject_data[:self.num_train]
         val_paths = subject_data[self.num_train:self.num_train+self.num_val]
         test_paths = subject_data[self.num_train+self.num_val:self.num_train+self.num_val+self.num_test]
-        self.train_dset = self.train_dset_class(train_paths[:],
-                                                num_coords=self.num_coords, max_slices=self.get_max_slices(),
+        self.train_dset = self.train_dset_class(train_paths[:], num_coords_voxel=self.num_coords_voxel,
+                                                num_coords_surface=self.num_coords_surface, max_slices=self.get_max_slices(),
                                                 max_slice_shape=self.get_max_slice_shape())
         self.val_dset = self.test_dset_class(val_paths[:],
                                              num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
@@ -167,8 +168,6 @@ class CMRDataModule(pl.LightningDataModule):
         for i, parent in enumerate(subjects):
             if parent in {"1013493", "1439318"}:
                 continue
-            if len(segs) == max_num:
-                break
             # Images
             la_files = sorted(list(Path(os.path.join(self.load_la_dir, parent)).rglob('la*.nii.gz')))
             la_files = [str(x) for x in la_files]
@@ -245,20 +244,21 @@ class CMRDataModule(pl.LightningDataModule):
             interp_segs.append(seg_interp_files)
             images.append(slices)
 
-        assert len(segs) == max_num
+        assert len(segs) >= max_num
         print(f"Found {len(images)} subjects.")
 
-        subject_data_paths = self.preprocess_subject_data(images, segs, segs_auto, interp_segs, seg_categories)
+        subject_data_paths = self.preprocess_subject_data(images, segs, segs_auto, max_num, interp_segs, seg_categories)
+        assert len(subject_data_paths) == max_num,  f"{len(subject_data_paths)} != {max_num}"
         return subject_data_paths
 
-    def preprocess_subject_data(self, subj_paths, seg_paths, seg_paths_auto, interp_seg_paths=None, seg_type_categories=None, debug=False):
+    def preprocess_subject_data(self, subj_paths, seg_paths, seg_paths_auto, max_num, interp_seg_paths=None, seg_type_categories=None, debug=False):
         if self.replace_existing_processed:
             print("Replacing existing preprocessed files.")
         store_path = Path(self.store_path)
         prepr_data_paths = []
         for subj_idx, (subj_slices, subj_seg_slices) in tqdm(list(enumerate(zip(subj_paths, seg_paths))), desc="Preprocessing subject data into torch tensor."):
-            # if subj_idx <1:
-            #     continue
+            if len(prepr_data_paths) == max_num:
+                break
             # If file already exists, add path to list and continue
             subject_id = Path([i for i in subj_slices if Path(i).parent.name == "sa_slices"][0]).parent.parent.name
             save_path = store_path / subject_id / PREPR_FILE_NAME
@@ -347,10 +347,10 @@ class CMRDataModule(pl.LightningDataModule):
                 try:
                     affines = normalize_slice_orientation(affines, segs, debug=False)
                 except ValueError as e:
-                    print(subject_id)
-                    raise e
+                    print(subject_id, e)
+                    continue
 
-                contours = [extract_2dt_contours(s, min_area=8, resolution_factor=5) for s in segs]
+                contours = extract_2dt_contours(segs, min_area=8, resolution_factor=5)
 
                 flippings = []
                 aff_params = []
@@ -426,13 +426,16 @@ class CMRDataModule(pl.LightningDataModule):
                         f.create_dataset('aff_params_padded', data=aff_params_padded.numpy(), compression=1)
                         f.create_dataset('spacings_padded', data=spacings_padded.numpy(), compression=1)
                         f.create_dataset('flippings_padded', data=needs_flip_padded.numpy(), compression=1)
+                        # Contours have structure slice_idx -> frame_idx -> class_dict -> contour_idx -> (N, 2) array
                         g = f.create_group('contours')
                         for slice_idx, slice_contours in enumerate(contours):
                             h = g.create_group(f'{slice_idx:02d}')
                             for frame_idx, frame_contours in enumerate(slice_contours):
                                 k = h.create_group(f'{frame_idx:02d}')
-                                for label_idx, label_contour in enumerate(frame_contours):
-                                    k.create_dataset(f'{label_idx}', data=label_contour, compression=1, dtype=float)
+                                for label_idx, label_contours in frame_contours.items():
+                                    l = k.create_group(f'{int(label_idx):02d}')
+                                    for c_idx, c in enumerate(label_contours):
+                                        l.create_dataset(f'{c_idx}', data=c, compression=1, dtype=float)
 
                 prepr_data_paths.append(str(save_path))
             except AssertionError as e:
