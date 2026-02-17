@@ -386,6 +386,7 @@ class INR_AutoReg(pl.LightningModule):
             seg_pred_d_mag = seg_pred_d_mag_.mean(2)  # Reduce PSF dimension
             loss_euk = (seg_pred_d_mag - 1)
             loss_euk = (loss_euk * loss_euk).mean()
+            loss_euk = self.weight_loss_deriv * loss_euk
             # Boundary loss
             _, seg_pred, _, _ = self.forward(
                 coords_surface, aff_params,
@@ -399,7 +400,8 @@ class INR_AutoReg(pl.LightningModule):
             seg_pred_ = seg_pred_[p_idx, coords_surface_class.reshape(-1)]
             loss_seg_per_class = (seg_pred_ * seg_pred_).reshape(seg_pred.shape[0], 3, coords_surface_class.shape[1] // 3)
             loss_seg_per_class = loss_seg_per_class.mean(-1).mean(0)
-            loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean() * self.weight_loss_seg
+            loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean()
+            loss_seg = self.weight_loss_seg * loss_seg
         # Regularization losses
         loss_regul, loss_reg_dict = self.regularization_criterion(subject_idx)
 
@@ -437,16 +439,16 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        # for i in range(0, 2):
-        #     batch = tuple(b[None].cuda() for b in dset[i])
-        #     latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5])
-        #     self.log_images(i, dset, mode=dset_str,
-        #                     latent_params=latent_params,
-        #                     aff_def_params=aff_def_params,
-        #                     intens_scale_params=intens_scale_params)
-        #     self.log_volume(i, dset, mode=dset_str,
-        #                     latent_params=latent_params,
-        #                     aff_def_params=aff_def_params)
+        for i in range(0, 2):
+            batch = tuple(b[None].cuda() for b in dset[i])
+            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5])
+            self.log_images(i, dset, mode=dset_str,
+                            latent_params=latent_params,
+                            aff_def_params=aff_def_params,
+                            intens_scale_params=intens_scale_params)
+            self.log_volume(i, dset, mode=dset_str,
+                            latent_params=latent_params,
+                            aff_def_params=aff_def_params)
         dset_str = 'val'
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, 1):
