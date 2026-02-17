@@ -237,7 +237,7 @@ class INR_AutoReg(pl.LightningModule):
     def process_input(self,
                       coords: torch.Tensor,
                       subject_latent: torch.Tensor,
-                      inference=True,
+                      inference=False,
                       **kwargs) -> torch.Tensor:
         # Make time dim cyclical
         coords = torch.cat((coords[..., :3],
