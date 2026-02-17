@@ -15,7 +15,7 @@ from tqdm import tqdm
 import traceback
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBFullImage
+from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBFullImage, CardiacUKBBValidation
 from normalization_utils import crop_around_heart, normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, extract_2dt_contours
@@ -91,12 +91,12 @@ class CMRDataModule(pl.LightningDataModule):
                                       num_coords_voxel=self.num_coords_voxel,
                                       num_coords_surface=self.num_coords_surface,
                                       cache_data=True, cache_to_gpu=False)
-        self.val_dset = CardiacUKBB(val_paths[:], max_slices=self.get_max_slices(),
+        self.val_dset = CardiacUKBBValidation(val_paths[:], max_slices=self.get_max_slices(),
                                     max_slice_shape=self.get_max_slice_shape(),
                                     num_coords_voxel=self.num_coords_voxel,
                                     num_coords_surface=self.num_coords_surface,
                                     cache_data=True, cache_to_gpu=False)
-        self.test_dset = CardiacUKBB(test_paths[:], max_slices=self.get_max_slices(),
+        self.test_dset = CardiacUKBBValidation(test_paths[:], max_slices=self.get_max_slices(),
                                      max_slice_shape=self.get_max_slice_shape(),
                                      num_coords_voxel=self.num_coords_voxel,
                                      num_coords_surface=self.num_coords_surface,
@@ -115,7 +115,7 @@ class CMRDataModule(pl.LightningDataModule):
                                            persistent_workers=self.num_workers > 0)
 
     def get_coord_size(self) -> int:
-        return self.train_dset.get_coord_size()
+        return self.train_dset.coord_size
 
     def extract_max_dims(self):
         if self.dim_max is not None:

@@ -19,15 +19,14 @@ class CardiacUKBB(Dataset):
         self.num_coords_contour = num_coords_surface
         self.max_slices = max_slices
         self.max_slice_shape = max_slice_shape
-        self.coord_size = None
         device = "cuda" if cache_to_gpu else "cpu"
         self.cache_data = cache_data
         if cache_data:
             H, W, T = self.max_slice_shape
             self.image_pad = torch.zeros((self.num_subjs, T, self.max_slices, H, W), dtype=torch.uint8, device=device)
             self.image_mask = torch.zeros(self.image_pad.shape, dtype=torch.bool, device=device)
-            # self.seg = torch.zeros(self.image_pad.shape, dtype=torch.uint8, device=device)
-            # self.gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool, device=device)
+            self.seg = torch.zeros(self.image_pad.shape, dtype=torch.uint8, device=device)
+            self.gt_available = torch.ones(self.image_pad.shape, dtype=torch.bool, device=device)
             self.non_padding_indices = [None]*self.num_subjs
             self.coord_max = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
             self.coord_min = torch.zeros((self.num_subjs, 4), dtype=torch.float32, device=device)
@@ -39,6 +38,8 @@ class CardiacUKBB(Dataset):
             self.load_data_to_cache()
             if cache_to_gpu:
                 self.non_padding_indices = [i.cuda() for i in self.non_padding_indices]
+        self.coord_size = self.load_subject_data(0, 0)[4].shape[-1]
+
 
     def load_data_to_cache(self):
         for i, path in tqdm.tqdm(list(enumerate(self.data_paths)), desc="Loading data to cache"):
@@ -51,8 +52,8 @@ class CardiacUKBB(Dataset):
                 # Load only the randomly selected padding mask frame from the (time, slices, H, W) volume
                 self.image_mask[i, :T, :S, :H, :W] = torch.tensor(f['image_padded_mask'][:], dtype=torch.bool)
                 # self.image_mask[i, :T,3:] = False
-                # self.seg[i, :T, :S, :H, :W] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8)
-                # self.gt_available[i, :T, :S, :H, :W] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool)
+                self.seg[i, :T, :S, :H, :W] = torch.tensor(f['seg_padded'][:], dtype=torch.uint8)
+                self.gt_available[i, :T, :S, :H, :W] = torch.tensor(f['gt_available_padded'][:], dtype=torch.bool)
                 # Get available non-padding indices in frame
                 non_padding_indices = make_masked_coordinate_tensor(self.image_mask[i, 0])
                 # Add the time index to get the full volume index
@@ -83,12 +84,6 @@ class CardiacUKBB(Dataset):
                                 contour_per_class[class_idx][s].append(c)
                     self.contours[i].append(contour_per_class)
 
-    def get_coord_size(self):
-        if self.coord_size is None:
-            coords, values, *_ = self.__getitem__(0)
-            self.coord_size = coords.shape[-1]
-        return self.coord_size
-
     def __len__(self):
         return len(self.data_paths)
 
@@ -104,8 +99,8 @@ class CardiacUKBB(Dataset):
             selected_frame = frame_idx
         if self.cache_data:
             image = self.image_pad[subj_idx, selected_frame].float() / 255.
-            # seg = self.seg[subj_idx, selected_frame]
-            # gt_avail= self.gt_available[subj_idx, selected_frame]
+            seg = self.seg[subj_idx, selected_frame]
+            gt_avail = self.gt_available[subj_idx, selected_frame]
             non_padding_indices = self.non_padding_indices[subj_idx]
             # full indices (slice, x, y, t)
             full_indices = torch.cat((non_padding_indices, torch.full_like(non_padding_indices[:, :1], selected_frame)),dim=1)
@@ -125,8 +120,8 @@ class CardiacUKBB(Dataset):
                 image_mask = torch.tensor(f['image_padded_mask'][selected_frame], dtype=torch.bool)
                 seg = torch.zeros_like(image, dtype=torch.bool)
                 seg[:S] = torch.tensor(f['seg_padded'][selected_frame], dtype=torch.uint8)
-                la_gt_available = torch.ones_like(seg, dtype=torch.bool)
-                la_gt_available[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
+                gt_avail = torch.ones_like(seg, dtype=torch.bool)
+                gt_avail[:S] = torch.tensor(f['gt_available_padded'][selected_frame], dtype=torch.bool)
 
                 # Get available non-padding indices in frame
                 non_padding_indices = make_masked_coordinate_tensor(image_mask)
@@ -161,28 +156,19 @@ class CardiacUKBB(Dataset):
                                            torch.full((c.shape[0], 1), selected_frame)), dim=1)
                             contour_per_class[class_idx][s].append(c)
         return (image,
-                # seg, la_gt_available,
+                seg, gt_avail,
                 full_indices, coord_min, coord_max,
                 aff_params_padded, spacings_padded, needs_flip_padded, num_subj_slices, contour_per_class)
 
     def __getitem__(self, idx: int):
         return self.generate_item(idx)
 
-    def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None, frame: Optional[int] = None):
-        # Load image and seg data
-        (img,
-         # _, _,
-         non_padding_indices, min_coords, max_coords, aff_params_padded, spacings_padded, needs_flip_padded,
-         num_subj_slices, contours) = self.load_subject_data(idx, frame)
-
+    def sample_image_points(self, img, non_padding_indices, num_coords: Optional[Union[int, float]] = None,):
         if num_coords is None:
             num_coords = self.num_coords
-            num_coords_contour = self.num_coords_contour
         elif isinstance(num_coords, float):
             num_coords = int(num_coords * torch.prod(img.shape))
-            num_coords_contour = int(num_coords * torch.prod(img.shape) * 0.2)
         else:
-            num_coords_contour = int(num_coords * 0.2)
             pass  # num_coord is already an int
         # Sample num_coords amount of indices that our batch will consist of
         indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
@@ -199,8 +185,9 @@ class CardiacUKBB(Dataset):
         # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
         voxel_indices = torch.concatenate((indices[:, 1:-1], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=-1)
         slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
-        sub_idx = torch.tensor(idx, dtype=torch.long)
+        return voxel_indices, image_values_sample, slice_indices
 
+    def sample_contour_points(self, contours, num_coords: Optional[Union[int, float]] = None,):
         # Contours
         surface_points_per_class = []
         for k, frame_contours in contours.items():
@@ -209,10 +196,17 @@ class CardiacUKBB(Dataset):
                 if slice_contours:
                     merged_points = torch.cat(slice_contours, dim=0)
                 else:
-                    merged_points = torch.zeros((0, voxel_indices.shape[-1]), dtype=torch.float32)
+                    merged_points = torch.zeros((0, self.coord_size), dtype=torch.float32)
                 slice_surf_points.append(merged_points)
             surface_points = torch.cat(slice_surf_points, dim=0)
-            contour_sample = torch.randint(0, surface_points.shape[0], (num_coords_contour,))
+
+            if num_coords is None:
+                num_coords = self.num_coords_contour
+            elif isinstance(num_coords, float):
+                num_coords = int(num_coords * surface_points.shape[0] * 0.2)
+            else:
+                pass  # num_coord is already an int
+            contour_sample = torch.randint(0, surface_points.shape[0], (num_coords,))
             surface_points_sample = surface_points[contour_sample]
             surface_points_per_class.append(surface_points_sample)
         surface_points_per_class = torch.stack(surface_points_per_class, dim=-2)
@@ -225,11 +219,67 @@ class CardiacUKBB(Dataset):
         surface_coords_per_class_ = surface_coords_per_class.reshape(-1, surface_coords_per_class.shape[-1])
         surface_points_class = torch.arange(0, len(contours.keys()))[None, :].tile(surface_points_per_class.shape[0], 1)
         surface_points_class_ = surface_points_class.reshape(-1, 1).long()
+        return surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_
+
+    def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None,
+                      num_coords_contour: Optional[Union[int, float]] = None, frame: Optional[int] = None):
+        # Load image and seg data
+        (img,
+         _, _,
+         non_padding_indices, min_coords, max_coords, aff_params_padded, spacings_padded, needs_flip_padded,
+         num_subj_slices, contours) = self.load_subject_data(idx, frame)
+        voxel_indices, image_values_sample, slice_indices \
+            = self.sample_image_points(img, non_padding_indices, num_coords)
+        surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_ = self.sample_contour_points(contours, num_coords)
+        sub_idx = torch.tensor(idx, dtype=torch.long)
 
         return (voxel_indices, image_values_sample, aff_params_padded, spacings_padded, needs_flip_padded,
                 sub_idx, slice_indices, min_coords, max_coords, num_subj_slices,
                 surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_)
 
+
+class CardiacUKBBValidation(CardiacUKBB):
+
+    def sample_image_points(self, img, non_padding_indices, seg, gt_avail,
+                            num_coords: Optional[Union[int, float]] = None,):
+        if num_coords is None:
+            num_coords = self.num_coords
+        elif isinstance(num_coords, float):
+            num_coords = int(num_coords * torch.prod(img.shape))
+        else:
+            pass  # num_coord is already an int
+        # Sample num_coords amount of indices that our batch will consist of
+        indices_sample = torch.randint(0, non_padding_indices.shape[0], (num_coords,))
+        # indices (slice, x, y)
+        indices = non_padding_indices[indices_sample]
+
+        # Get image values at the indices samples
+        image_values_sample = img[tuple(indices.T[:-1])]
+        seg_sample = seg[tuple(indices.T[:-1])]
+        seg_sample = to_1hot(seg_sample, num_class=4)
+        gt_avail_sample = gt_avail[tuple(indices.T[:-1])]
+
+        # Create coordinates of point in the slice (x, y, z, t) where z == 0. Shape: (N, 4)
+        voxel_indices = torch.concatenate((indices[:, 1:-1], torch.zeros_like(indices[:, :1]), indices[:, -1:]), dim=-1)
+        slice_indices = indices[:, :1]  # Get which slice does each point belong to. Shape: (N, 1)
+        return voxel_indices, image_values_sample, slice_indices, seg_sample, gt_avail_sample
+
+    def generate_item(self, idx: int, num_coords: Optional[Union[int, float]] = None,
+                      num_coords_contour: Optional[Union[int, float]] = None, frame: Optional[int] = None):
+        # Load image and seg data
+        (img,
+         seg, gt_avail,
+         non_padding_indices, min_coords, max_coords, aff_params_padded, spacings_padded, needs_flip_padded,
+         num_subj_slices, contours) = self.load_subject_data(idx, frame)
+        voxel_indices, image_values_sample, slice_indices, seg_sample, gt_avail_sample \
+            = self.sample_image_points(img, non_padding_indices, seg, gt_avail  , num_coords)
+        surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_ \
+            = self.sample_contour_points(contours, num_coords)
+        sub_idx = torch.tensor(idx, dtype=torch.long)
+
+        return (voxel_indices, image_values_sample, seg_sample, gt_avail_sample, aff_params_padded, spacings_padded, needs_flip_padded,
+                sub_idx, slice_indices, min_coords, max_coords, num_subj_slices,
+                surface_coords_per_class_, surface_points_slice_idx_, surface_points_class_)
 
 class CardiacUKBBValidationFullImage(CardiacUKBB):
 

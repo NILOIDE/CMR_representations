@@ -22,7 +22,7 @@ from monai.losses import DiceLoss
 from torch.utils.data import DataLoader
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBB
+from dataset import CardiacUKBB, CardiacUKBBValidation
 from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
@@ -437,16 +437,16 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        for i in range(0, 2):
-            batch = tuple(b[None].cuda() for b in dset[i])
-            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5])
-            self.log_images(i, dset, mode=dset_str,
-                            latent_params=latent_params,
-                            aff_def_params=aff_def_params,
-                            intens_scale_params=intens_scale_params)
-            self.log_volume(i, dset, mode=dset_str,
-                            latent_params=latent_params,
-                            aff_def_params=aff_def_params)
+        # for i in range(0, 2):
+        #     batch = tuple(b[None].cuda() for b in dset[i])
+        #     latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5])
+        #     self.log_images(i, dset, mode=dset_str,
+        #                     latent_params=latent_params,
+        #                     aff_def_params=aff_def_params,
+        #                     intens_scale_params=intens_scale_params)
+        #     self.log_volume(i, dset, mode=dset_str,
+        #                     latent_params=latent_params,
+        #                     aff_def_params=aff_def_params)
         dset_str = 'val'
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, 1):
@@ -470,7 +470,6 @@ class INR_AutoReg(pl.LightningModule):
                                  point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
                                  point_spread_start_epoch = self.inf_point_spread_start_epoch,
                                  weight_loss_seg = self.inf_weight_loss_seg,
-                                 weight_loss_deriv = self.weight_loss_deriv,
                                  )
             if not self.logging_wandb_disabled:
                 wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
@@ -594,7 +593,7 @@ class INR_AutoReg(pl.LightningModule):
         point_spread_std_after = torch.tensor(point_spread_std_after, dtype=torch.float32, device="cuda"
                                               ).reshape(1, 1, 1, self.coord_size)
         supervise_seg = weight_loss_seg > 0
-        instance_dset = CardiacUKBB([dset.data_paths[subj_idx]],
+        instance_dset = CardiacUKBBValidation([dset.data_paths[subj_idx]],
                                               dset.max_slices, dset.max_slice_shape,
                                               dset.num_coords, cache_data=True, cache_to_gpu=True)
         subj_id = Path(instance_dset.data_paths[0]).parent.name
@@ -604,7 +603,7 @@ class INR_AutoReg(pl.LightningModule):
             save_path = self.log_path / 'inf_sanity_check' / f"{self.current_epoch:06d}_{subj_idx}_inf.png"
             save_path.parent.parent.mkdir(exist_ok=True)
             save_path.parent.mkdir(exist_ok=True)
-            save_image(instance_dset.image_pad[0, :6, ..., 0].reshape(-1, instance_dset.image_pad.shape[-3]), str(save_path))
+            save_image(instance_dset.image_pad[0, 0, :6].float().cpu().reshape(-1, instance_dset.image_pad.shape[-3]), str(save_path))
 
         best_score = None
         best_inf_step_num = 0
@@ -615,7 +614,7 @@ class INR_AutoReg(pl.LightningModule):
             batch = (b[None].cuda() for b in instance_dset.__getitem__(0))
             (coords_voxel, img_values, seg_gt, gt_avail,
              aff_params_padded, spacings_padded, needs_flip_padded,
-             subject_idx, slice_idx, min_coords, max_coords, num_subj_slices) = batch
+             subject_idx, slice_idx, min_coords, max_coords, num_subj_slices, *_) = batch
 
             # Reset gradients (if optimizers exist for those params)
             if optimize_latent_params: opt_latent.zero_grad()
