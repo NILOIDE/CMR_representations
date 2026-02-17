@@ -25,9 +25,9 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
-    logging_rate: int = 1_000
-    logging_start_rate: int = 2_000
-    addit_log_epochs: Tuple[int, ...] = (500, 1500,)
+    logging_rate: int = 2_000
+    logging_start_rate: int = 10_000
+    addit_log_epochs: Tuple[int, ...] = (1000, 2000, 5000)
     num_train: int = 100
     num_val: int = 2
     num_test: int = 1
@@ -37,15 +37,15 @@ class Params:
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10_000
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 2000
+    point_spread_start_epoch: int = 10000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 10000
+    num_coords_during_point_spread: int = 30000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
-    hidden_size: int = 256
+    hidden_size: int = 512
     latent_size: int = 16
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)

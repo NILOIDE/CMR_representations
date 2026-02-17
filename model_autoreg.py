@@ -22,7 +22,7 @@ from monai.losses import DiceLoss
 from torch.utils.data import DataLoader
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBBValidation, CardiacUKBB
+from dataset import CardiacUKBB
 from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
@@ -60,7 +60,7 @@ class INR_AutoReg(pl.LightningModule):
         self.spatial_functa_res = kwargs["spatial_functa_resolution"]
         self.use_spatial_functa = self.spatial_functa_res > 1
         assert isinstance(self.spatial_functa_res, int) and self.spatial_functa_res > 0
-        latent_vector_size = self.latent_size * self.spatial_functa_res**4
+        latent_vector_size = self.latent_size * self.spatial_functa_res**3
         self.subj_latents = nn.Parameter(torch.randn((self.num_subjects, latent_vector_size),
                                                      dtype=torch.float32, device="cuda") * 1e-2, requires_grad=True)
 
@@ -246,10 +246,12 @@ class INR_AutoReg(pl.LightningModule):
         coords_enc = self.pos_enc(coords, None if inference else self.global_step)
         if self.use_spatial_functa:
             r = self.spatial_functa_res
-            spatial_latent_params = subject_latent.reshape(-1, r, r, r, r, self.latent_size)  # 4D volume
-            latent_coords = coords / 2 + 0.5 * r
-            subject_latent = fast_4Dlinear_interpolation(spatial_latent_params, latent_coords[..., 0],
-                                                          latent_coords[..., 1], latent_coords[..., 2], latent_coords[..., 3])
+            spatial_latent_params = subject_latent.reshape(-1, r, r, r, self.latent_size)  # 4D volume
+            subject_latent = torch.nn.functional.grid_sample(spatial_latent_params.moveaxis(-1,1), coords[..., None, None, :3],
+                                                             mode='bilinear', align_corners=True)[..., 0, 0].moveaxis(1, -1)
+            # latent_coords = coords / 2 + 0.5 * r
+            # subject_latent = fast_4Dlinear_interpolation(spatial_latent_params, latent_coords[..., 0],
+            #                                               latent_coords[..., 1], latent_coords[..., 2], latent_coords[..., 3])
         else:
             subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
         x = torch.cat((coords_enc, subject_latent), dim=-1)
@@ -550,11 +552,6 @@ class INR_AutoReg(pl.LightningModule):
                                          intens_scale_params=optimized_intensity_def,)
             self.canonical_inr.load_state_dict(starting_inr_weights)
 
-    def get_inf_dset(self, subj_idx: int, dset: CardiacUKBB):
-        return CardiacUKBBValidation([dset.data_paths[subj_idx]],
-                                     dset.max_slices, dset.max_slice_shape,
-                                     dset.num_coords, to_gpu=True)
-
     def initialize_inference_params(self):
         latent_params = nn.Parameter(torch.randn((1, self.subj_latents.shape[1]), dtype=torch.float32, device="cuda")*1e-3, requires_grad=True)
         aff_def_params = nn.Parameter(torch.zeros((1, self.max_slices, 6), dtype=torch.float32, device="cuda"), requires_grad=True)
@@ -583,7 +580,6 @@ class INR_AutoReg(pl.LightningModule):
                   point_spread_std_after: Iterable[float] = (0.4, 0.4, 0.4, 0.4),
                   point_spread_start_epoch: int = 0,
                   weight_loss_seg: float = 0.0,  # By default, we assume we don't have segmentation at inf time
-                  weight_loss_deriv: float = 0.0,
                   score_window_size=20,
                   log=True,
                   ):
@@ -598,10 +594,9 @@ class INR_AutoReg(pl.LightningModule):
         point_spread_std_after = torch.tensor(point_spread_std_after, dtype=torch.float32, device="cuda"
                                               ).reshape(1, 1, 1, self.coord_size)
         supervise_seg = weight_loss_seg > 0
-        supervise_deriv = weight_loss_deriv > 0
-        instance_dset = CardiacUKBBValidation([dset.data_paths[subj_idx]],
+        instance_dset = CardiacUKBB([dset.data_paths[subj_idx]],
                                               dset.max_slices, dset.max_slice_shape,
-                                              dset.num_coords, to_gpu=True)
+                                              dset.num_coords, cache_data=True, cache_to_gpu=True)
         subj_id = Path(instance_dset.data_paths[0]).parent.name
         # instance_dloader = DataLoader(instance_dset, shuffle=False, num_workers=0)
         # Save to disk
@@ -1017,6 +1012,8 @@ class INR_AutoReg(pl.LightningModule):
             # Log video slices
             videos = [wandb.Video(c, fps=max(1, int(50 / video_duration)), format='gif') for c in content]
             wandb.log({f"{mode}_volumes/subj_{subj_id}": videos})
+            if not self.supervise_seg:
+                return
             # Log meshes
             meshes = process_segmentation_with_marching_cubes(segs[..., 0], level=0.5, step_size=1)
             if not meshes:

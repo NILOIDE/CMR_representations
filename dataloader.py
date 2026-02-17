@@ -15,7 +15,7 @@ from tqdm import tqdm
 import traceback
 
 from data_utils import array_to_nifti
-from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBValidation, CardiacUKBBFullImage
+from dataset import CardiacUKBB, CardiacUKBBValidationFullImage, CardiacUKBBFullImage
 from normalization_utils import crop_around_heart, normalize_slice_orientation
 from sa_la_interp import interpolate_sa_segs_to_la
 from utils import normalize_image_with_percentile, mat_to_params, extract_2dt_contours
@@ -45,8 +45,6 @@ class CMRDataModule(pl.LightningDataModule):
         self.load_sa_dir = load_sa_dir
         self.store_path = preprocessed_store_path
         self.log_path = log_path
-        self.train_dset_class = CardiacUKBB
-        self.test_dset_class = CardiacUKBBValidation
         self.crop_around_heart = crop_around_heart
         self.replace_existing_processed = replace_existing_preprocessed
         self.batch_size = batch_size
@@ -88,26 +86,32 @@ class CMRDataModule(pl.LightningDataModule):
         train_paths = subject_data[:self.num_train]
         val_paths = subject_data[self.num_train:self.num_train+self.num_val]
         test_paths = subject_data[self.num_train+self.num_val:self.num_train+self.num_val+self.num_test]
-        self.train_dset = self.train_dset_class(train_paths[:], num_coords_voxel=self.num_coords_voxel,
-                                                num_coords_surface=self.num_coords_surface, max_slices=self.get_max_slices(),
-                                                max_slice_shape=self.get_max_slice_shape())
-        self.val_dset = self.test_dset_class(val_paths[:],
-                                             num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
-                                             max_slice_shape=self.get_max_slice_shape())
-        self.test_dset = self.test_dset_class(test_paths[:],
-                                              num_coords=self.inf_num_coords, max_slices=self.get_max_slices(),
-                                              max_slice_shape=self.get_max_slice_shape())
+        self.train_dset = CardiacUKBB(train_paths[:], max_slices=self.get_max_slices(),
+                                      max_slice_shape=self.get_max_slice_shape(),
+                                      num_coords_voxel=self.num_coords_voxel,
+                                      num_coords_surface=self.num_coords_surface,
+                                      cache_data=True, cache_to_gpu=False)
+        self.val_dset = CardiacUKBB(val_paths[:], max_slices=self.get_max_slices(),
+                                    max_slice_shape=self.get_max_slice_shape(),
+                                    num_coords_voxel=self.num_coords_voxel,
+                                    num_coords_surface=self.num_coords_surface,
+                                    cache_data=True, cache_to_gpu=False)
+        self.test_dset = CardiacUKBB(test_paths[:], max_slices=self.get_max_slices(),
+                                     max_slice_shape=self.get_max_slice_shape(),
+                                     num_coords_voxel=self.num_coords_voxel,
+                                     num_coords_surface=self.num_coords_surface,
+                                     cache_data=True, cache_to_gpu=False)
         self.data_prepared = True
 
     def setup(self, stage: str):
         self._train_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size, shuffle=True,
-                                            num_workers=self.num_workers, pin_memory=True,
+                                            num_workers=self.num_workers, pin_memory=False,
                                             persistent_workers=self.num_workers > 0)
         self._val_dataloader = DataLoader(self.val_dset, batch_size=self.batch_size,
-                                          num_workers=self.num_workers, pin_memory=True,
+                                          num_workers=self.num_workers, pin_memory=False,
                                           persistent_workers=self.num_workers > 0)
         self._test_dataloader = DataLoader(self.train_dset, batch_size=self.batch_size,
-                                           num_workers=self.num_workers, pin_memory=True,
+                                           num_workers=self.num_workers, pin_memory=False,
                                            persistent_workers=self.num_workers > 0)
 
     def get_coord_size(self) -> int:
