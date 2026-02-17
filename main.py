@@ -32,7 +32,7 @@ class Params:
     num_val: int = 2
     num_test: int = 1
     num_workers: int = 4
-    batch_size: int = 2
+    batch_size: int = 4
 
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10_000
