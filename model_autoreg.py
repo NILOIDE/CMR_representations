@@ -27,8 +27,12 @@ from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
     process_segmentation_with_marching_cubes, data_frame_to_line_plot, video_array_to_file, draw_3d_vectors_on_image, \
-    fast_4Dlinear_interpolation, fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true
+    fast_4Dlinear_interpolation, fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true, burn_contours
 
+RED = (1.0, 0.0, 0.0)
+GREEN = (0.0, 1.0, 0.0)
+BLUE = (1.0, 1.0, 0.0)
+COLORS = {1: RED, 2: GREEN, 3: BLUE}
 
 class INR_AutoReg(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
@@ -246,12 +250,10 @@ class INR_AutoReg(pl.LightningModule):
         coords_enc = self.pos_enc(coords, None if inference else self.global_step)
         if self.use_spatial_functa:
             r = self.spatial_functa_res
-            spatial_latent_params = subject_latent.reshape(-1, r, r, r, self.latent_size)  # 4D volume
-            subject_latent = torch.nn.functional.grid_sample(spatial_latent_params.moveaxis(-1,1), coords[..., None, None, :3],
-                                                             mode='bilinear', align_corners=True)[..., 0, 0].moveaxis(1, -1)
-            # latent_coords = coords / 2 + 0.5 * r
-            # subject_latent = fast_4Dlinear_interpolation(spatial_latent_params, latent_coords[..., 0],
-            #                                               latent_coords[..., 1], latent_coords[..., 2], latent_coords[..., 3])
+            spatial_latent_params = subject_latent.reshape(-1, r, r, r, self.latent_size)
+            latent_coords = coords / 2 + 0.5 * r
+            subject_latent = fast_trilinear_interpolation(spatial_latent_params, latent_coords[..., 0],
+                                                          latent_coords[..., 1], latent_coords[..., 2])
         else:
             subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
         x = torch.cat((coords_enc, subject_latent), dim=-1)
@@ -313,7 +315,7 @@ class INR_AutoReg(pl.LightningModule):
                                   point_spread_size: int,
                                   point_spread_std: torch.Tensor,
                                   return_deriv: bool = False,
-                                  reduction: bool = False,
+                                  reduction: bool = True,
                                   **kwargs,
                                   ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         B, N, C = coords_voxel.shape
@@ -363,50 +365,46 @@ class INR_AutoReg(pl.LightningModule):
          coords_surface, coords_surface_slice_idx, coords_surface_class) = batch
         latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(subject_idx)
         # Forward INR with coordinates
-        values_pred_, _, seg_pred_d_, _ = self.forward_with_point_spread(
-            coords_voxel, aff_params,
-            spacings, needs_flip,
-            slice_idx,
-            min_coords, max_coords,
-            latent_params, aff_def_params,
-            self.point_spread_size_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_size_after,
-            self.point_spread_std_before if self.current_epoch < self.point_spread_start_epoch else self.point_spread_std_after,
-            return_deriv=self.supervise_seg,
-            reduction=False)
-        values_pred = values_pred_.mean(2)  # Reduce PSF dimension
+        warm_up = self.current_epoch < self.point_spread_start_epoch
+        values_pred, _, sdf_pred_d, _ = self.forward_with_point_spread(coords_voxel, aff_params, spacings, needs_flip,
+            slice_idx, min_coords, max_coords, latent_params, aff_def_params,
+            self.point_spread_size_before if warm_up else self.point_spread_size_after,
+            self.point_spread_std_before if warm_up else self.point_spread_std_after,
+            return_deriv=warm_up)
         # Apply learnt intensity scaling to each slice
         values_deform = self.apply_intensity_scaling(intens_values, coords_voxel, slice_idx, intens_scale_params)
         # Recon loss
         loss_recon = self.psnr_loss(values_pred, values_deform)
         # Seg metrics and loss
-        loss_seg, loss_euk, loss_seg_per_class = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
+        loss_sdf, loss_euk, loss_sdf_per_class = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
         if self.supervise_seg:
             # Eikonal loss
-            seg_pred_d_mag_ = torch.linalg.norm(seg_pred_d_[..., :-1], dim=-1)  # Get magnitude of spatial dimensions
-            seg_pred_d_mag = seg_pred_d_mag_.mean(2)  # Reduce PSF dimension
-            loss_euk = (seg_pred_d_mag - 1)
+            if not warm_up:
+                # When using PSF, the deriv is very expensive.
+                # After the warmup when PSF starts, we compute it here only for the voxel centers
+                _, _, sdf_pred_d, _ = self.forward(coords_voxel, aff_params, spacings, needs_flip, slice_idx,
+                                                    min_coords, max_coords, latent_params, aff_def_params,
+                                                    return_deriv=True)
+            sdf_pred_d_mag = torch.linalg.norm(sdf_pred_d[..., :-1], dim=-1)  # Get magnitude of spatial dimensions
+            loss_euk = (sdf_pred_d_mag - 1)
             loss_euk = (loss_euk * loss_euk).mean()
             loss_euk = self.weight_loss_deriv * loss_euk
             # Boundary loss
-            _, seg_pred, _, _ = self.forward(
-                coords_surface, aff_params,
-                spacings, needs_flip,
-                coords_surface_slice_idx,
-                min_coords, max_coords,
-                latent_params, aff_def_params,
-                return_deriv=False)
-            seg_pred_ = seg_pred.reshape(-1, seg_pred.shape[-1])
-            p_idx = torch.arange(seg_pred_.shape[0], device=seg_pred.device)
-            seg_pred_ = seg_pred_[p_idx, coords_surface_class.reshape(-1)]
-            loss_seg_per_class = (seg_pred_ * seg_pred_).reshape(seg_pred.shape[0], 3, coords_surface_class.shape[1] // 3)
-            loss_seg_per_class = loss_seg_per_class.mean(-1).mean(0)
-            loss_seg = (loss_seg_per_class * self.class_weight.to(loss_seg_per_class.device)).mean()
-            loss_seg = self.weight_loss_seg * loss_seg
+            _, sdf_pred, _, _ = self.forward(coords_surface, aff_params, spacings, needs_flip, coords_surface_slice_idx,
+                                             min_coords, max_coords, latent_params, aff_def_params,
+                                             return_deriv=False)
+            sdf_pred_ = sdf_pred.reshape(-1, sdf_pred.shape[-1])
+            p_idx = torch.arange(sdf_pred_.shape[0], device=sdf_pred.device)
+            sdf_pred_ = sdf_pred_[p_idx, coords_surface_class.reshape(-1)]
+            loss_sdf_per_class = (sdf_pred_ * sdf_pred_).reshape(sdf_pred.shape[0], 3, coords_surface_class.shape[1] // 3)
+            loss_sdf_per_class = loss_sdf_per_class.mean(-1).mean(0)
+            loss_sdf = (loss_sdf_per_class * self.class_weight.to(loss_sdf_per_class.device)).mean()
+            loss_sdf = self.weight_loss_seg * loss_sdf
         # Regularization losses
         loss_regul, loss_reg_dict = self.regularization_criterion(subject_idx)
 
         # Backprop losses and update params
-        loss = loss_recon + loss_regul + loss_seg + loss_euk
+        loss = loss_recon + loss_regul + loss_sdf + loss_euk
         self.manual_backward(loss)
         opt_inr.step()
         opt_params.step()
@@ -414,11 +412,11 @@ class INR_AutoReg(pl.LightningModule):
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
-                       {"loss": loss, "loss_recon": loss_recon, "loss_seg": loss_seg, "loss_seg_euk": loss_euk
+                       {"loss": loss, "loss_recon": loss_recon, "loss_seg": loss_sdf, "loss_seg_euk": loss_euk
                         }.items()}, prog_bar=True)
         self.log_dict({f"{log_name}/{k}": v for k, v in
-                       {"loss_LV": loss_seg_per_class[-3], "loss_MYO": loss_seg_per_class[-2],
-                        "loss_RV": loss_seg_per_class[-1],
+                       {"loss_LV": loss_sdf_per_class[-3], "loss_MYO": loss_sdf_per_class[-2],
+                        "loss_RV": loss_sdf_per_class[-1],
                         # "seg_deriv_std": seg_pred_d_mag.std().item(),
                         **loss_reg_dict}.items()}, prog_bar=False)
 
@@ -745,7 +743,7 @@ class INR_AutoReg(pl.LightningModule):
         dices = [[] for _ in range(20)]
         for t in tqdm.tqdm(range(0, 50), desc=f"Logging {mode} slices for subject {subj_idx} (UKBB id: {subj_id})"):
             images, seg_argmax, _, full_indices, coord_min, coord_max, \
-                aff_params_padded, spacings_padded, flippings_padded, num_subj_slices, _ \
+                aff_params_padded, spacings_padded, flippings_padded, num_subj_slices, contours \
                 = dataset.load_subject_data(subj_idx, t)
             images, num_subj_slices = images.cuda()[None], num_subj_slices.cuda()[None]
             B, S, H, W = images.shape
@@ -801,22 +799,27 @@ class INR_AutoReg(pl.LightningModule):
                 # Image
                 img = torch.stack([torch.cat([images[0,s,...], pred_img], 0)]*3, 0)
                 # Segmentation
-                segs_argmax = torch.cat([seg_argmax[0,s], pred_seg_argmax], 0)
-                seg_frames = torch.stack([torch.cat([images[0,s,...], images[0,s,...]], 0)]*3, 0)
-                red = torch.tensor((1.0, 0.0, 0.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
-                green = torch.tensor((0.0, 1.0, 0.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
-                blue = torch.tensor((0.0, 1.0, 1.0), device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
-                seg_mask = torch.stack([segs_argmax == 1] * 3, dim=0)
+                contour_im = torch.stack([images[0,s,...]]*3, -1)
+                for contour_class, c_per_slice in reversed(contours.items()):
+                    if c_per_slice[s]:
+                        contour_im = burn_contours(contour_im, c_per_slice[s], COLORS[contour_class])
+                contour_im = contour_im.moveaxis(-1, 0)
+                seg_frames = torch.stack([images[0,s,...]]*3, 0)
+                red = torch.tensor(RED, device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                green = torch.tensor(GREEN, device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                blue = torch.tensor(BLUE, device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
+                seg_mask = torch.stack([pred_seg_argmax == 1] * 3, dim=0)
                 seg_frames = torch.where(seg_mask, red, seg_frames)
-                seg_mask = torch.stack([segs_argmax == 2] * 3, dim=0)
+                seg_mask = torch.stack([pred_seg_argmax == 2] * 3, dim=0)
                 seg_frames = torch.where(seg_mask, green, seg_frames)
-                seg_mask = torch.stack([segs_argmax == 3] * 3, dim=0)
+                seg_mask = torch.stack([pred_seg_argmax == 3] * 3, dim=0)
                 seg_frames = torch.where(seg_mask, blue, seg_frames)
+                seg_frames = torch.cat([contour_im, seg_frames], 1)
                 # Derivatives
-                pred_img_dt = pred_sdf_d_.reshape(H, W, *pred_sdf_d_.shape[-2:])[...,0, :3].moveaxis(-1, 0)
-                pred_img_dt = torch.tanh(pred_img_dt)/2+0.5
-                pred_img2_dt = pred_sdf_d_.reshape(H, W, *pred_sdf_d_.shape[-2:])[...,-1, :3].moveaxis(-1, 0)
-                pred_img2_dt = torch.tanh(pred_img2_dt)/2+0.5
+                pred_img_dt = pred_seg[...,1:].float().moveaxis(-1, 0)
+                # pred_img_dt = torch.tanh(pred_img_dt)/2+0.5
+                pred_img2_dt = (pred_sdf<=0).float().moveaxis(-1, 0)
+                # pred_img2_dt = torch.tanh(pred_img2_dt)/2+0.5
                 # pred_img_dt = torch.stack([pred_img_dt.abs()]*3, dim=0)
                 # pred_img2_dt = torch.stack([pred_img2_dt.abs()]*3, dim=0)
                 # Learnable intensity scale

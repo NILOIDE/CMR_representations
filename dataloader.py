@@ -39,7 +39,8 @@ class CMRDataModule(pl.LightningDataModule):
                  num_coords_voxel: int = 40000,
                  num_coords_surface: int = 10000,
                  inf_num_coords: int = 4000,
-                 num_workers: int = 0,):
+                 num_workers: int = 0,
+                 cache_data=False):
         super().__init__()
         self.load_la_dir = load_la_dir
         self.load_sa_dir = load_sa_dir
@@ -64,6 +65,7 @@ class CMRDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.subject_data = []
         self.data_prepared = False
+        self.cache_data = cache_data
 
     def prepare_data(self) -> None:
         if self.data_prepared:
@@ -90,17 +92,17 @@ class CMRDataModule(pl.LightningDataModule):
                                       max_slice_shape=self.get_max_slice_shape(),
                                       num_coords_voxel=self.num_coords_voxel,
                                       num_coords_surface=self.num_coords_surface,
-                                      cache_data=True, cache_to_gpu=False)
+                                      cache_data=self.cache_data, cache_to_gpu=False)
         self.val_dset = CardiacUKBBValidation(val_paths[:], max_slices=self.get_max_slices(),
                                     max_slice_shape=self.get_max_slice_shape(),
                                     num_coords_voxel=self.num_coords_voxel,
                                     num_coords_surface=self.num_coords_surface,
-                                    cache_data=True, cache_to_gpu=False)
+                                    cache_data=self.cache_data, cache_to_gpu=False)
         self.test_dset = CardiacUKBBValidation(test_paths[:], max_slices=self.get_max_slices(),
                                      max_slice_shape=self.get_max_slice_shape(),
                                      num_coords_voxel=self.num_coords_voxel,
                                      num_coords_surface=self.num_coords_surface,
-                                     cache_data=True, cache_to_gpu=False)
+                                     cache_data=self.cache_data, cache_to_gpu=False)
         self.data_prepared = True
 
     def setup(self, stage: str):
@@ -354,7 +356,7 @@ class CMRDataModule(pl.LightningDataModule):
                     print(subject_id, e)
                     continue
 
-                contours = extract_2dt_contours(segs, min_area=8, resolution_factor=5)
+                contours = extract_2dt_contours(segs, min_area=8, resolution_factor=5, debug_img_slices=images)
 
                 flippings = []
                 aff_params = []

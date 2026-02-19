@@ -40,7 +40,7 @@ class Params:
     point_spread_start_epoch: int = 10000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 30000
+    num_coords_during_point_spread: int = 10000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
@@ -54,9 +54,9 @@ class Params:
     weight_reg_aff: float = 1e-4
     weight_reg_lat: float = 1e-1
     weight_reg_int_scale: float = 1e-2
-    weight_loss_deriv: float = 0e0
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 0e2
+    weight_loss_seg: float = 1e2
+    weight_loss_deriv: float = 1e0
     weight_seg_class: Tuple[float, float, float] = (4,4,3)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
@@ -118,7 +118,8 @@ def main():
                                 num_coords_voxel=params.num_coords_voxel,
                                 num_coords_surface=params.num_coords_surface,
                                 inf_num_coords=params.inf_num_coords,
-                                num_workers=params.num_workers)
+                                num_workers=params.num_workers,
+                                cache_data=params.cache_data)
     data_module.prepare_data()
 
     checkpoint_path = model_path / 'checkpoints'

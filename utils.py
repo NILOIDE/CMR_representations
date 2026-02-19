@@ -51,59 +51,116 @@ def normalize_image_with_mean_lv_value(im: Union[np.ndarray, torch.Tensor], mean
     """ Normalize such that LV pool has value of 0.5. Assumes min value is 0.0. """
     return im / (mean_value / target_value)
 
-
+@torch.jit.script
 def fast_trilinear_interpolation(input_array: torch.Tensor,
                                  y_indices: torch.Tensor,
                                  x_indices: torch.Tensor,
                                  z_indices: torch.Tensor) -> torch.Tensor:
-    """ Trilinear interpolation of a batch of 3D volumes.
-     :param input_array: Images used as source for the sampling.                Shape: (batch, height, width, depth)
-     :param y_indices: Indices of the 1st spatial dimension of a given image.   Shape: (batch, num_points)
-     :param x_indices:                                                          Shape: (batch, num_points)
-     :param z_indices:                                                          Shape: (batch, num_points)
-     """
+    """
+        Optimized Trilinear interpolation using Flat Indexing.
+        Shape assumptions:
+          input_array: (Batch, Height, Width, Depth, Channels)
+          indices:     (Batch, Num_Points)
+        """
+    # 1. Get dimensions
+    B, H, W, D, C = input_array.shape
+
+    # 2. Compute floor coordinates (integers)
+    # We detach to ensure no gradients flow into the indices
     x0 = torch.floor(y_indices.detach()).to(torch.long)
     y0 = torch.floor(x_indices.detach()).to(torch.long)
     z0 = torch.floor(z_indices.detach()).to(torch.long)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    z1 = z0 + 1
 
-    x0 = torch.clamp(x0, 0, input_array.shape[1] - 1)
-    y0 = torch.clamp(y0, 0, input_array.shape[2] - 1)
-    z0 = torch.clamp(z0, 0, input_array.shape[3] - 1)
-    x1 = torch.clamp(x1, 0, input_array.shape[1] - 1)
-    y1 = torch.clamp(y1, 0, input_array.shape[2] - 1)
-    z1 = torch.clamp(z1, 0, input_array.shape[3] - 1)
+    # 3. Clamp to volume boundaries
+    # (Using clamp is faster than modulo or manual checks)
+    x0 = torch.clamp(x0, 0, H - 1)
+    y0 = torch.clamp(y0, 0, W - 1)
+    z0 = torch.clamp(z0, 0, D - 1)
 
-    x = y_indices - x0
-    y = x_indices - y0
-    z = z_indices - z0
+    x1 = torch.clamp(x0 + 1, 0, H - 1)
+    y1 = torch.clamp(y0 + 1, 0, W - 1)
+    z1 = torch.clamp(z0 + 1, 0, D - 1)
 
-    b, _ = torch.meshgrid(torch.arange(0, x.shape[0], device=x.device),
-                          torch.arange(0, x.shape[1], device=x.device))
-    b_ = b.reshape(-1)
-    x0_ = x0.reshape(-1)
-    x1_ = x1.reshape(-1)
-    y0_ = y0.reshape(-1)
-    y1_ = y1.reshape(-1)
-    z0_ = z0.reshape(-1)
-    z1_ = z1.reshape(-1)
-    x_ = x.reshape(-1)
-    y_ = y.reshape(-1)
-    z_ = z.reshape(-1)
-    output_ = (
-        input_array[b_, x0_, y0_, z0_] * (1 - x_) * (1 - y_) * (1 - z_) +
-        input_array[b_, x1_, y0_, z0_] * x_ * (1 - y_) * (1 - z_) +
-        input_array[b_, x0_, y1_, z0_] * (1 - x_) * y_ * (1 - z_) +
-        input_array[b_, x0_, y0_, z1_] * (1 - x_) * (1 - y_) * z_ +
-        input_array[b_, x1_, y0_, z1_] * x_ * (1 - y_) * z_ +
-        input_array[b_, x0_, y1_, z1_] * (1 - x_) * y_ * z_ +
-        input_array[b_, x1_, y1_, z0_] * x_ * y_ * (1 - z_) +
-        input_array[b_, x1_, y1_, z1_] * x_ * y_ * z_
-    )
-    output = output_.reshape(x0.shape)
-    return output
+    # 4. Compute fractional weights
+    # Gradients MUST flow through these
+    wa = y_indices - x0
+    wb = x_indices - y0
+    wc = z_indices - z0
+
+    # Expand weights for broadcasting with channels later: (Batch*Points, 1)
+    # We flatten them here to match the flat index shape
+    wa = wa.reshape(-1, 1)
+    wb = wb.reshape(-1, 1)
+    wc = wc.reshape(-1, 1)
+
+    # 5. Compute Linear Indices
+    # Instead of vol[b, x, y, z], we use vol_flat[idx]
+    # Stride calculation:
+    stride_b = H * W * D
+    stride_h = W * D
+    stride_w = D
+
+    # Create batch offsets
+    # num_points = x0.shape[1]
+    # b_idx = torch.arange(B, device=input_array.device).view(B, 1).expand(-1, num_points).reshape(-1)
+
+    # Efficient Batch Index generation:
+    # We assume indices are (Batch, N). We can infer N from x0.
+    N = x0.shape[1]
+    b_idx = torch.arange(B, device=input_array.device).repeat_interleave(N)
+
+    # Flatten spatial indices
+    x0f = x0.reshape(-1)
+    y0f = y0.reshape(-1)
+    z0f = z0.reshape(-1)
+    x1f = x1.reshape(-1)
+    y1f = y1.reshape(-1)
+    z1f = z1.reshape(-1)
+
+    # Pre-compute base offsets for the corners to save adds
+    base_00 = b_idx * stride_b + x0f * stride_h + y0f * stride_w
+    base_01 = b_idx * stride_b + x0f * stride_h + y1f * stride_w
+    base_10 = b_idx * stride_b + x1f * stride_h + y0f * stride_w
+    base_11 = b_idx * stride_b + x1f * stride_h + y1f * stride_w
+
+    # Calculate final 1D indices for all 8 corners
+    i000 = base_00 + z0f
+    i001 = base_00 + z1f
+    i010 = base_01 + z0f
+    i011 = base_01 + z1f
+    i100 = base_10 + z0f
+    i101 = base_10 + z1f
+    i110 = base_11 + z0f
+    i111 = base_11 + z1f
+
+    # 6. Gather values
+    # Flatten input to (Batch * H * W * D, Channels)
+    vol_flat = input_array.reshape(-1, C)
+
+    v000 = vol_flat[i000]
+    v001 = vol_flat[i001]
+    v010 = vol_flat[i010]
+    v011 = vol_flat[i011]
+    v100 = vol_flat[i100]
+    v101 = vol_flat[i101]
+    v110 = vol_flat[i110]
+    v111 = vol_flat[i111]
+
+    # 7. Interpolate
+    # (1-w) * v0 + w * v1
+    c00 = v000 * (1 - wa) + v100 * wa
+    c01 = v010 * (1 - wa) + v110 * wa
+    c10 = v001 * (1 - wa) + v101 * wa
+    c11 = v011 * (1 - wa) + v111 * wa
+
+    c0 = c00 * (1 - wb) + c01 * wb
+    c1 = c10 * (1 - wb) + c11 * wb
+
+    c = c0 * (1 - wc) + c1 * wc
+
+    # 8. Reshape to output
+    # Output shape: (Batch, Num_Points, Channels)
+    return c.reshape(B, N, C)
 
 
 def fast_4Dlinear_interpolation(input_array: torch.Tensor,
@@ -737,7 +794,7 @@ def is_LV_bloodpool_enclosed(segmentation_map):
     return ~is_touching_background
 
 
-def extract_2dt_contours(segmentation_slices, class_ids=(1, 2, 3), min_area=10, resolution_factor=5):
+def extract_2dt_contours(segmentation_slices, class_ids=(1, 2, 3), min_area=10, resolution_factor=5, debug_img_slices=None):
     """
     Extracts smoothed, hierarchical contours from a 2D+t segmentation volume.
 
@@ -924,3 +981,58 @@ def keep_last_true(segmentations):
     result[mask_indices + (last_true_idx[has_true],)] = True
 
     return result
+
+
+def burn_contours(image, contours_list, color=(1.0, 1.0, 1.0)):
+    """
+    image: 2D tensor (H, W, 3)
+    contours_list: A list of tensors/arrays for the specific slice/time
+                   (e.g., contour_per_class[class_idx][slice_idx])
+    """
+    # 1. Work on a copy to avoid corrupting the original data
+    debug_img = image.clone()
+
+    # Determine "White" value (max possible value for this datatype)
+    # If float 0-1, use 1.0. If uint8 0-255, use 255.
+
+    height, width, C = debug_img.shape
+
+    for contour in contours_list:
+        # contour shape is (N, 4) -> [slice, x, y, time] or similar
+        # Extract columns 1 and 2.
+        # NOTE: You previously mentioned swapping X/Y fixed orientation.
+        # Standard Matrix indexing is img[ROW, COL], which is img[y, x].
+
+        if contour.shape[-1] == 4:
+            coords = contour[:,1:3]
+        else:
+            coords = contour
+        if isinstance(coords, torch.Tensor):
+            coords = coords
+
+        # Round to nearest integer to get valid array indices
+        # We assume column 0 is X (col) and column 1 is Y (row) based on your plot
+        # But for numpy indexing, we need [row, col] -> [y, x]
+
+        # If your plot required swapping, ensure you extract them as:
+        # col_indices (x) = coords[:, 0]
+        # row_indices (y) = coords[:, 1]
+
+        x_indices = torch.round(coords[:, 0]).long()
+        y_indices = torch.round(coords[:, 1]).long()
+
+        # 2. Boundary Check (Crucial!)
+        # Filter out points that fall outside the image dimensions
+        valid_mask = (
+                (x_indices >= 0) & (x_indices < width) &
+                (y_indices >= 0) & (y_indices < height)
+        )
+
+        x_indices = x_indices[valid_mask]
+        y_indices = y_indices[valid_mask]
+
+        # 3. "Burn" the pixels
+        # Numpy indexing is [row, col] -> [y, x]
+        debug_img[x_indices, y_indices] = torch.tensor(color, dtype=torch.float32, device=debug_img.device)
+
+    return debug_img
