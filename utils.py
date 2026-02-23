@@ -18,6 +18,12 @@ MEAN_4CH_LV_VALUE = 224.8285
 MAX_4CH_LV_VALUE = 473.0
 
 
+RED = (1.0, 0.0, 0.0)
+GREEN = (0.0, 1.0, 0.0)
+BLUE = (1.0, 1.0, 0.0)
+COLORS = {1: RED, 2: GREEN, 3: BLUE}
+
+
 def get_center_coord(segmentation_map):
     # Get the largest contour
     contours, _ = cv2.findContours(segmentation_map.numpy().astype(np.uint8),
@@ -929,7 +935,7 @@ def equalize_sdf_hierarchies(sdf: torch.Tensor) -> torch.Tensor:
     num_classes = sdf.shape[-1]
     new_sdf = sdf.clone()
     for c in range(1, num_classes):
-        new_sdf[..., c] = torch.amin(new_sdf[..., c-1:c], dim=-1)
+        new_sdf[..., c] = torch.minimum(new_sdf[..., c - 1], new_sdf[..., c])
     return new_sdf
 
 
@@ -983,12 +989,14 @@ def keep_last_true(segmentations):
     return result
 
 
-def burn_contours(image, contours_list, color=(1.0, 1.0, 1.0)):
+def burn_contours(image, contours_list, color=None):
     """
     image: 2D tensor (H, W, 3)
     contours_list: A list of tensors/arrays for the specific slice/time
                    (e.g., contour_per_class[class_idx][slice_idx])
     """
+    if color is None:
+        color = COLORS
     # 1. Work on a copy to avoid corrupting the original data
     debug_img = image.clone()
 

@@ -15,24 +15,18 @@ import pandas as pd
 from torch import nn
 from torchvision.utils import save_image
 import torch.nn.functional as F
-import torch.nn.init as init
 import lightning.pytorch as pl
 import wandb
 from monai.losses import DiceLoss
-from torch.utils.data import DataLoader
 
 from data_utils import array_to_nifti
 from dataset import CardiacUKBB, CardiacUKBBValidation
 from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
-    process_segmentation_with_marching_cubes, data_frame_to_line_plot, video_array_to_file, draw_3d_vectors_on_image, \
-    fast_4Dlinear_interpolation, fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true, burn_contours
+    process_segmentation_with_marching_cubes, data_frame_to_line_plot, video_array_to_file, \
+    fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true, burn_contours, RED, GREEN, BLUE
 
-RED = (1.0, 0.0, 0.0)
-GREEN = (0.0, 1.0, 0.0)
-BLUE = (1.0, 1.0, 0.0)
-COLORS = {1: RED, 2: GREEN, 3: BLUE}
 
 class INR_AutoReg(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
@@ -77,7 +71,7 @@ class INR_AutoReg(pl.LightningModule):
                                                num_frequencies=kwargs['pe_num_frequencies'],
                                                anneal_max_iter=kwargs['pe_anneal_max_iter'],
                                                anneal_start_prop=kwargs['pe_anneal_start_prop'])
-        self.canonical_inr = MLP(self.pos_enc.out_dim + self.latent_size,
+        self.canonical_inr = MLP(self.pos_enc.out_dim, self.latent_size,
                                  num_hidden_layers=kwargs['num_hidden_layers'],
                                  hidden_size=kwargs['hidden_size'],
                                  out_size=self.intensity_size + self.num_classes)
@@ -125,12 +119,12 @@ class INR_AutoReg(pl.LightningModule):
             params_ = params[non_pad_slices]
         else:
             params_ = params
-        loss_reg_aff = nn.functional.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
+        loss_reg_aff = F.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
         return loss_reg_aff, {dict_name: loss_reg_aff}
 
     @staticmethod
     def loss_reg_latent_params(params: torch.Tensor, weight: float, dict_name='loss_reg_lat'):
-        loss_reg_lat = nn.functional.mse_loss(params, torch.zeros_like(params)) * weight if weight else 0.0
+        loss_reg_lat = F.mse_loss(params, torch.zeros_like(params)) * weight if weight else 0.0
         return loss_reg_lat, {dict_name: loss_reg_lat}
 
     @staticmethod
@@ -140,7 +134,7 @@ class INR_AutoReg(pl.LightningModule):
             params_ = params[non_pad_slices]
         else:
             params_ = params
-        loss_reg_int = nn.functional.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
+        loss_reg_int = F.mse_loss(params_, torch.zeros_like(params_)) * weight if weight else 0.0
         return loss_reg_int, {dict_name: loss_reg_int}
 
     def regularization_criterion(self, subj_idx: torch.Tensor) \
@@ -234,15 +228,15 @@ class INR_AutoReg(pl.LightningModule):
                     subject_latent: torch.Tensor,
                     **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
-        net_input = self.process_input(coords, subject_latent, **kwargs)
-        values_pred, seg_pred = self.forward_view_inr(net_input=net_input)
+        coords_enc, subject_latent_tile = self.process_input(coords, subject_latent, **kwargs)
+        values_pred, seg_pred = self.forward_view_inr(coords_enc, subject_latent_tile)
         return values_pred, seg_pred
 
     def process_input(self,
                       coords: torch.Tensor,
                       subject_latent: torch.Tensor,
                       inference=False,
-                      **kwargs) -> torch.Tensor:
+                      **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
         # Make time dim cyclical
         coords = torch.cat((coords[..., :3],
                             torch.cos(coords[...,-1:] * torch.pi),
@@ -256,28 +250,22 @@ class INR_AutoReg(pl.LightningModule):
                                                           latent_coords[..., 1], latent_coords[..., 2])
         else:
             subject_latent = subject_latent[:, None].tile((1, coords.shape[1], 1))
-        x = torch.cat((coords_enc, subject_latent), dim=-1)
-        return x
+        # x = torch.cat((coords_enc, subject_latent), dim=-1)
+        return coords_enc, subject_latent
 
     def forward_view_inr(self,
-                         coords: Optional[torch.Tensor] = None,
-                         subject_latent: Optional[torch.Tensor] = None,
-                         net_input: Optional[torch.Tensor] = None,
-                         use_target_net: bool = False,
+                         coords: Optional[torch.Tensor],
+                         subject_latent: Optional[torch.Tensor],
                          **kwargs) \
             -> Tuple[torch.Tensor, torch.Tensor]:
-        if net_input is None:
-            net_input = self.process_input(coords, subject_latent, **kwargs)
         # Forward INR to obtain predicted volume values
-        B, N, F = net_input.shape
-        x_ = net_input.reshape((-1, F))
-        if use_target_net:
-            values_pred_ = self.target_net(x_)
-        else:
-            values_pred_ = self.canonical_inr(x_)
+        B, N, F = coords.shape
+        coords_ = coords.reshape((B*N, -1))
+        subject_latent_ = subject_latent.reshape((B*N, -1))
+        values_pred_ = self.canonical_inr(coords_, subject_latent_)
         values_pred = values_pred_[:, 0].reshape((B, N))
         values_pred = torch.sigmoid(values_pred)
-        seg_pred = values_pred_[:, 1:4].reshape((B, N, self.num_classes))
+        seg_pred = values_pred_[:, 1:].reshape((B, N, self.num_classes))
         return values_pred, seg_pred
 
     def forward_intensity_params(self,
@@ -360,29 +348,32 @@ class INR_AutoReg(pl.LightningModule):
         opt_latent.zero_grad()
 
         # Get batch elements
-        (coords_voxel, intens_values, aff_params, spacings, needs_flip,
+        (coords_voxel, intens_values, seg_values, gt_avail, aff_params, spacings, needs_flip,
          subject_idx, slice_idx, min_coords, max_coords, num_subj_slices,
          coords_surface, coords_surface_slice_idx, coords_surface_class) = batch
         latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(subject_idx)
         # Forward INR with coordinates
-        warm_up = self.current_epoch < self.point_spread_start_epoch
-        values_pred, _, sdf_pred_d, _ = self.forward_with_point_spread(coords_voxel, aff_params, spacings, needs_flip,
-            slice_idx, min_coords, max_coords, latent_params, aff_def_params,
-            self.point_spread_size_before if warm_up else self.point_spread_size_after,
-            self.point_spread_std_before if warm_up else self.point_spread_std_after,
-            return_deriv=warm_up)
-        # Apply learnt intensity scaling to each slice
-        values_deform = self.apply_intensity_scaling(intens_values, coords_voxel, slice_idx, intens_scale_params)
-        # Recon loss
-        loss_recon = self.psnr_loss(values_pred, values_deform)
+        sdf_pred_d =  None
+        # warm_up = self.current_epoch < self.point_spread_start_epoch
+        # values_pred, _, sdf_pred_d, _ = self.forward_with_point_spread(coords_voxel, aff_params, spacings, needs_flip,
+        #     slice_idx, min_coords, max_coords, latent_params, aff_def_params,
+        #     self.point_spread_size_before if warm_up else self.point_spread_size_after,
+        #     self.point_spread_std_before if warm_up else self.point_spread_std_after,
+        #     return_deriv=warm_up)
+        # # Apply learnt intensity scaling to each slice
+        # values_deform = self.apply_intensity_scaling(intens_values, coords_voxel, slice_idx, intens_scale_params)
+        # # Recon loss
+        # loss_recon = self.psnr_loss(values_pred, values_deform)
         # Seg metrics and loss
-        loss_sdf, loss_euk, loss_sdf_per_class = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
+        loss_sdf, loss_euk, myo_loss = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
+        loss_sdf_per_class, loss_sdf_sign = 0.0, 0.0
+        loss_thickness = 0.0
         if self.supervise_seg:
             # Eikonal loss
-            if not warm_up:
+            if sdf_pred_d is None:
                 # When using PSF, the deriv is very expensive.
                 # After the warmup when PSF starts, we compute it here only for the voxel centers
-                _, _, sdf_pred_d, _ = self.forward(coords_voxel, aff_params, spacings, needs_flip, slice_idx,
+                _, sdf_pred_voxel, sdf_pred_d, _ = self.forward(coords_voxel, aff_params, spacings, needs_flip, slice_idx,
                                                     min_coords, max_coords, latent_params, aff_def_params,
                                                     return_deriv=True)
             sdf_pred_d_mag = torch.linalg.norm(sdf_pred_d[..., :-1], dim=-1)  # Get magnitude of spatial dimensions
@@ -400,11 +391,35 @@ class INR_AutoReg(pl.LightningModule):
             loss_sdf_per_class = loss_sdf_per_class.mean(-1).mean(0)
             loss_sdf = (loss_sdf_per_class * self.class_weight.to(loss_sdf_per_class.device)).mean()
             loss_sdf = self.weight_loss_seg * loss_sdf
+
+            # # The distance from the endo myo contour to the epi contour should be at least 3 voxels
+            # thickness = sdf_pred[...,0] - sdf_pred[...,1]
+            # thickness_ = thickness[coords_surface_slice_idx.squeeze(-1) > 6]  # This only applies to mid-ventr and apical slices
+            # thickness_ = thickness_.clamp(max=2/80)
+            # loss_thickness = -thickness_.mean()
+            # thickness2 = sdf_pred[...,1] - sdf_pred[...,2]
+            # thickness2_ = thickness2[coords_surface_slice_idx.squeeze(-1) > 6]  # This only applies to mid-ventr and apical slices
+            # thickness2_ = thickness2_.clamp(max=0)
+            # loss_thickness += -thickness2_.mean()
+
+            if self.current_epoch < 2500:
+                seg_hierarchy = seg_values[..., 1:].clone()
+                seg_hierarchy[..., 1] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1]
+                seg_hierarchy[..., 2] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1] + seg_hierarchy[...,2]
+                is_foreground = seg_hierarchy * gt_avail[..., None]
+                foreground_sdf = sdf_pred_voxel * is_foreground
+                foreground_sdf = foreground_sdf.clamp(min=0.0)
+                loss_sdf_sign = foreground_sdf.mean()
+                background_sdf = sdf_pred_voxel * seg_values[...,:1] * gt_avail[..., None]
+                background_sdf = background_sdf.clamp(max=0.0)
+                loss_sdf_sign += -background_sdf.mean()
+
         # Regularization losses
         loss_regul, loss_reg_dict = self.regularization_criterion(subject_idx)
 
         # Backprop losses and update params
-        loss = loss_recon + loss_regul + loss_sdf + loss_euk
+        # loss = loss_recon + loss_regul + loss_sdf + loss_euk
+        loss = loss_regul + loss_sdf + loss_euk + loss_thickness + loss_sdf_sign
         self.manual_backward(loss)
         opt_inr.step()
         opt_params.step()
@@ -412,12 +427,14 @@ class INR_AutoReg(pl.LightningModule):
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
-                       {"loss": loss, "loss_recon": loss_recon, "loss_seg": loss_sdf, "loss_seg_euk": loss_euk
+                       {"loss": loss, "loss_recon": 0.0, "loss_seg": loss_sdf, "loss_seg_euk": loss_euk,
+                        # "loss_thickness": loss_thickness,
+                        'loss_sdf_sign': loss_sdf_sign,
                         }.items()}, prog_bar=True)
         self.log_dict({f"{log_name}/{k}": v for k, v in
                        {"loss_LV": loss_sdf_per_class[-3], "loss_MYO": loss_sdf_per_class[-2],
                         "loss_RV": loss_sdf_per_class[-1],
-                        # "seg_deriv_std": seg_pred_d_mag.std().item(),
+                        "seg_deriv_std": sdf_pred_d_mag.std().item(),
                         **loss_reg_dict}.items()}, prog_bar=False)
 
     @staticmethod
@@ -439,7 +456,7 @@ class INR_AutoReg(pl.LightningModule):
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, 2):
             batch = tuple(b[None].cuda() for b in dset[i])
-            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5])
+            latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5+2])
             self.log_images(i, dset, mode=dset_str,
                             latent_params=latent_params,
                             aff_def_params=aff_def_params,
@@ -447,40 +464,40 @@ class INR_AutoReg(pl.LightningModule):
             self.log_volume(i, dset, mode=dset_str,
                             latent_params=latent_params,
                             aff_def_params=aff_def_params)
-        dset_str = 'val'
-        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        for i in range(0, 1):
-            latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-            opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
-            opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
-            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
-            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
-                = self.inference(i, dset,
-                                 latent_params=latent_params,
-                                 aff_def_params=aff_def_params,
-                                 intens_scale_params=intens_scale_params,
-                                 opt_latent=opt_latent,
-                                 opt_affine_def=opt_affine_def,
-                                 opt_intensity_def=opt_intensity_def,
-                                 dset_str = dset_str,
-                                 max_epochs=self.inf_max_epochs,
-                                 point_spread_size_before = self.point_spread_size_before,
-                                 point_spread_size_after = self.point_spread_size_after,
-                                 point_spread_std_before = self.point_spread_std_before.squeeze().tolist(),
-                                 point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
-                                 point_spread_start_epoch = self.inf_point_spread_start_epoch,
-                                 weight_loss_seg = self.inf_weight_loss_seg,
-                                 )
-            if not self.logging_wandb_disabled:
-                wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-                wandb.log({f'{dset_str}/inf_best_score': best_score})
-            self.log_images(i, dset, mode=dset_str,
-                            latent_params=optimized_latent,
-                            aff_def_params=optimized_affine_def,
-                            intens_scale_params=optimized_intensity_def)
-            self.log_volume(i, dset, mode=dset_str,
-                            latent_params=optimized_latent,
-                            aff_def_params=optimized_affine_def)
+        # dset_str = 'val'
+        # dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        # for i in range(0, 1):
+        #     latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+        #     opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
+        #     opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
+        #     opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
+        #     optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
+        #         = self.inference(i, dset,
+        #                          latent_params=latent_params,
+        #                          aff_def_params=aff_def_params,
+        #                          intens_scale_params=intens_scale_params,
+        #                          opt_latent=opt_latent,
+        #                          opt_affine_def=opt_affine_def,
+        #                          opt_intensity_def=opt_intensity_def,
+        #                          dset_str = dset_str,
+        #                          max_epochs=self.inf_max_epochs,
+        #                          point_spread_size_before = self.point_spread_size_before,
+        #                          point_spread_size_after = self.point_spread_size_after,
+        #                          point_spread_std_before = self.point_spread_std_before.squeeze().tolist(),
+        #                          point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
+        #                          point_spread_start_epoch = self.inf_point_spread_start_epoch,
+        #                          weight_loss_seg = self.inf_weight_loss_seg,
+        #                          )
+        #     if not self.logging_wandb_disabled:
+        #         wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+        #         wandb.log({f'{dset_str}/inf_best_score': best_score})
+        #     self.log_images(i, dset, mode=dset_str,
+        #                     latent_params=optimized_latent,
+        #                     aff_def_params=optimized_affine_def,
+        #                     intens_scale_params=optimized_intensity_def)
+        #     self.log_volume(i, dset, mode=dset_str,
+        #                     latent_params=optimized_latent,
+        #                     aff_def_params=optimized_affine_def)
 
     def do_testing(self, dset=None, dset_str = 'test'):
         if dset is None:
@@ -802,7 +819,7 @@ class INR_AutoReg(pl.LightningModule):
                 contour_im = torch.stack([images[0,s,...]]*3, -1)
                 for contour_class, c_per_slice in reversed(contours.items()):
                     if c_per_slice[s]:
-                        contour_im = burn_contours(contour_im, c_per_slice[s], COLORS[contour_class])
+                        contour_im = burn_contours(contour_im, c_per_slice[s])
                 contour_im = contour_im.moveaxis(-1, 0)
                 seg_frames = torch.stack([images[0,s,...]]*3, 0)
                 red = torch.tensor(RED, device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
@@ -816,7 +833,8 @@ class INR_AutoReg(pl.LightningModule):
                 seg_frames = torch.where(seg_mask, blue, seg_frames)
                 seg_frames = torch.cat([contour_im, seg_frames], 1)
                 # Derivatives
-                pred_img_dt = pred_seg[...,1:].float().moveaxis(-1, 0)
+                pred_img_dt = pred_sdf[...,-1].float() + 0.5
+                pred_img_dt = torch.stack([pred_img_dt]*3, dim=0)
                 # pred_img_dt = torch.tanh(pred_img_dt)/2+0.5
                 pred_img2_dt = (pred_sdf<=0).float().moveaxis(-1, 0)
                 # pred_img2_dt = torch.tanh(pred_img2_dt)/2+0.5
@@ -876,7 +894,7 @@ class INR_AutoReg(pl.LightningModule):
             dices_strings = [f"Dice:" + f"{d[1].item():.2f}, " + f"{d[2].item():.2f}, " + f"{d[3].item():.2f}"
                              if i >= 3 or d[1] >= 0. else "Dice: -, -, -" for i, d in enumerate(dices)]
             wandb_videos = [wandb.Video(v, fps=max(1, int(50 / video_duration)), format='gif',
-                                        caption=f"Slice:{i}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
+                                        caption=f"Slice:{i}, Epoch:{self.current_epoch}, {psnr_strings[i]}  {dices_strings[i]}") for i, v in enumerate(videos)]
             wandb.log({f"{mode}_videos/subj_{subj_id}": wandb_videos})
         # Save series to file as mp4
         save_dir_vid = save_dir / "videos"
@@ -1014,7 +1032,8 @@ class INR_AutoReg(pl.LightningModule):
         # Log to WANDB
         if not self.logging_wandb_disabled:
             # Log video slices
-            videos = [wandb.Video(c, fps=max(1, int(50 / video_duration)), format='gif') for c in content]
+            videos = [wandb.Video(c, fps=max(1, int(50 / video_duration)), format='gif',
+                                  caption=f"Epoch:{self.current_epoch}") for c in content]
             wandb.log({f"{mode}_volumes/subj_{subj_id}": videos})
             if not self.supervise_seg:
                 return

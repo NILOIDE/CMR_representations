@@ -33,6 +33,7 @@ class Params:
     num_test: int = 1
     num_workers: int = 4
     batch_size: int = 4
+    cache_data: bool = True
 
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10_000
@@ -40,7 +41,7 @@ class Params:
     point_spread_start_epoch: int = 10000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 10000
+    num_coords_during_point_spread: int = 20_000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
@@ -51,12 +52,12 @@ class Params:
     spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
-    weight_reg_aff: float = 1e-4
-    weight_reg_lat: float = 1e-1
-    weight_reg_int_scale: float = 1e-2
+    weight_reg_aff: float = 1e-3
+    weight_reg_lat: float = 1e-3
+    weight_reg_int_scale: float = 0e-5
     # Segmentation ----------------------------------------------------------------
-    weight_loss_seg: float = 1e2
-    weight_loss_deriv: float = 1e0
+    weight_loss_seg: float = 0e3
+    weight_loss_deriv: float = 0e1
     weight_seg_class: Tuple[float, float, float] = (4,4,3)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
     learning_rate: float = 1e-4
@@ -162,8 +163,6 @@ def main():
         ckpt = torch.load(params.inference_path)
         model.load_state_dict(ckpt['state_dict'])
         model.canonical_inr = model.canonical_inr.to('cuda')
-        model.target_net = deepcopy(model.canonical_inr)
-        model.regist_inr = model.regist_inr.to('cuda')
         model.do_testing(data_module.test_dset, )
 
 

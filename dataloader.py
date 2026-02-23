@@ -88,7 +88,7 @@ class CMRDataModule(pl.LightningDataModule):
         train_paths = subject_data[:self.num_train]
         val_paths = subject_data[self.num_train:self.num_train+self.num_val]
         test_paths = subject_data[self.num_train+self.num_val:self.num_train+self.num_val+self.num_test]
-        self.train_dset = CardiacUKBB(train_paths[:], max_slices=self.get_max_slices(),
+        self.train_dset = CardiacUKBBValidation(train_paths[:], max_slices=self.get_max_slices(),
                                       max_slice_shape=self.get_max_slice_shape(),
                                       num_coords_voxel=self.num_coords_voxel,
                                       num_coords_surface=self.num_coords_surface,
