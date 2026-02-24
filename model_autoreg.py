@@ -516,40 +516,40 @@ class INR_AutoReg(pl.LightningModule):
             self.log_volume(i, dset, mode=dset_str,
                             latent_params=latent_params,
                             aff_def_params=aff_def_params)
-        # dset_str = 'val'
-        # dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        # for i in range(0, 1):
-        #     latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-        #     opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
-        #     opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
-        #     opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
-        #     optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
-        #         = self.inference(i, dset,
-        #                          latent_params=latent_params,
-        #                          aff_def_params=aff_def_params,
-        #                          intens_scale_params=intens_scale_params,
-        #                          opt_latent=opt_latent,
-        #                          opt_affine_def=opt_affine_def,
-        #                          opt_intensity_def=opt_intensity_def,
-        #                          dset_str = dset_str,
-        #                          max_epochs=self.inf_max_epochs,
-        #                          point_spread_size_before = self.point_spread_size_before,
-        #                          point_spread_size_after = self.point_spread_size_after,
-        #                          point_spread_std_before = self.point_spread_std_before.squeeze().tolist(),
-        #                          point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
-        #                          point_spread_start_epoch = self.inf_point_spread_start_epoch,
-        #                          weight_loss_seg = self.inf_weight_loss_seg,
-        #                          )
-        #     if not self.logging_wandb_disabled:
-        #         wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
-        #         wandb.log({f'{dset_str}/inf_best_score': best_score})
-        #     self.log_images(i, dset, mode=dset_str,
-        #                     latent_params=optimized_latent,
-        #                     aff_def_params=optimized_affine_def,
-        #                     intens_scale_params=optimized_intensity_def)
-        #     self.log_volume(i, dset, mode=dset_str,
-        #                     latent_params=optimized_latent,
-        #                     aff_def_params=optimized_affine_def)
+        dset_str = 'val'
+        dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
+        for i in range(0, 2):
+            latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
+            opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
+            opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
+            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
+            optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
+                = self.inference(i, dset,
+                                 latent_params=latent_params,
+                                 aff_def_params=aff_def_params,
+                                 intens_scale_params=intens_scale_params,
+                                 opt_latent=opt_latent,
+                                 opt_affine_def=opt_affine_def,
+                                 opt_intensity_def=opt_intensity_def,
+                                 dset_str = dset_str,
+                                 max_epochs=self.inf_max_epochs,
+                                 point_spread_size_before = self.point_spread_size_before,
+                                 point_spread_size_after = self.point_spread_size_after,
+                                 point_spread_std_before = self.point_spread_std_before.squeeze().tolist(),
+                                 point_spread_std_after = self.point_spread_std_after.squeeze().tolist(),
+                                 point_spread_start_epoch = self.inf_point_spread_start_epoch,
+                                 weight_loss_seg = self.inf_weight_loss_seg,
+                                 )
+            if not self.logging_wandb_disabled:
+                wandb.log({f'{dset_str}/inf_best_step_num': best_step_num})
+                wandb.log({f'{dset_str}/inf_best_score': best_score})
+            self.log_images(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def,
+                            intens_scale_params=optimized_intensity_def)
+            self.log_volume(i, dset, mode=dset_str,
+                            latent_params=optimized_latent,
+                            aff_def_params=optimized_affine_def)
 
     def do_testing(self, dset=None, dset_str = 'test'):
         if dset is None:
