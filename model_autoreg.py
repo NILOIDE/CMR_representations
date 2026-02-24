@@ -407,6 +407,7 @@ class INR_AutoReg(pl.LightningModule):
         loss_recon = self.psnr_loss(values_pred, values_deform)
         # Seg metrics and loss
         loss_sdf, loss_euk, loss_sdf_per_class = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
+        sdf_pred_d_mag = torch.tensor((0.,))
         loss_sdf_sign = 0.0
         loss_thickness = 0.0
         if self.supervise_seg:
