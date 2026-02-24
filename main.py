@@ -53,8 +53,8 @@ class Params:
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_lat: float = 1e-3
-    weight_reg_aff: float = 1e-3
-    weight_reg_int_scale: float = 0e-5
+    weight_reg_aff: float = 1e-6
+    weight_reg_int_scale: float = 0e-6
     # Segmentation ----------------------------------------------------------------
     weight_loss_seg: float = 0e3
     weight_loss_deriv: float = 0e1
@@ -68,7 +68,7 @@ class Params:
     learning_rate_anneal_eta_min_psf: float = 1e-6
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
-    pe_anneal_max_epochs: int = 15000
+    pe_anneal_max_epochs: int = 13000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
