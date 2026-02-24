@@ -21,7 +21,7 @@ from model_autoreg import INR_AutoReg
 class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
-    max_epochs: int = 1_000_000
+    max_epochs: int = 20_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
@@ -52,20 +52,23 @@ class Params:
     spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
-    weight_reg_aff: float = 1e-3
     weight_reg_lat: float = 1e-3
+    weight_reg_aff: float = 1e-3
     weight_reg_int_scale: float = 0e-5
     # Segmentation ----------------------------------------------------------------
     weight_loss_seg: float = 0e3
     weight_loss_deriv: float = 0e1
     weight_seg_class: Tuple[float, float, float] = (4,4,3)  # Will be normalized
     # Learning rates -------------------------------------------------------------------
-    learning_rate: float = 1e-4
-    learning_rate_aff: float = 1e-4
-    learning_rate_def: float = 1e-4
+    learning_rate_inr: float = 1e-3
+    learning_rate_lat: float = 1e-3
+    learning_rate_aff: float = 1e-2
+    learning_rate_int_scale: float = 1e-2
+    learning_rate_anneal_eta_min: float = 1e-4
+    learning_rate_anneal_eta_min_psf: float = 1e-6
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
-    pe_anneal_max_iter: int = 200_000
+    pe_anneal_max_epochs: int = 15000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
@@ -92,9 +95,11 @@ def main():
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     # Pass arguments using the command line like:
-    # python main.py --conv_channels 32 64 128 --no-use_conv
-    # For bools such as 'use_conv' passing --use_conv will make it True, passing --no-use_conv will make it False
+    # python main.py --point_spread_std_after 0.3 0.3 0.3 0.3 --no-cache_data
+    # For bools such as 'cache_data' passing --cache_data will make it True, passing --no-cache_data will make it False
     params = tyro.cli(Params)
+    params.pe_anneal_max_iter = params.pe_anneal_max_epochs * params.num_train / params.batch_size
+    params.lr_anneal_tmax = params.point_spread_start_epoch
     print(params)
 
     if params.inference and 'inference' not in params.job_name:
@@ -152,13 +157,16 @@ def main():
             limit_val_batches=1.0,
             num_sanity_val_steps=1,
         )
-        ckpt_path = params.resume_checkpoint_path if params.resume_checkpoint_path else None
+        ckpt_path = None
+        if params.resume_checkpoint_path:
+            ckpt_path = params.resume_checkpoint_path
+        # First train up until point-spread start epochs
         trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
         # Then continue with updated datasets ready for point-spread
         trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
+        model.reset_schedulers(params.max_epochs, params.learning_rate_anneal_eta_min_psf)
         trainer.fit_loop.max_epochs = params.max_epochs
         trainer.fit(model, datamodule=data_module)
-        # First train up until point-spread start epochs
     else:
         ckpt = torch.load(params.inference_path)
         model.load_state_dict(ckpt['state_dict'])

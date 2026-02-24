@@ -25,8 +25,12 @@ from networks import MLP
 from pos_encoding import PosEncodingNeRFAnnealed, PosEncodinFourier
 from utils import params_to_mat, make_coordinate_tensor, to_1hot, create_meshplot_visualization, \
     process_segmentation_with_marching_cubes, data_frame_to_line_plot, video_array_to_file, \
-    fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true, burn_contours, RED, GREEN, BLUE
+    fast_trilinear_interpolation, sdf_hierarchy_to_seg, keep_last_true, burn_contours
 
+RED = (1.0, 0.0, 0.0)
+GREEN = (0.0, 1.0, 0.0)
+BLUE = (1.0, 1.0, 0.0)
+COLORS = {1: RED, 2: GREEN, 3: BLUE}
 
 class INR_AutoReg(pl.LightningModule):
     def __init__(self, coord_size: int, num_subjects: int, max_slices: int, log_path: Optional[Path] = None, **kwargs):
@@ -84,13 +88,16 @@ class INR_AutoReg(pl.LightningModule):
         self.weight_reg_inr = kwargs["weight_reg_inr"]
         self.weight_reg_aff = kwargs["weight_reg_aff"]
         self.weight_reg_lat = kwargs["weight_reg_lat"]
-        self.weight_intensity_scale = kwargs["weight_reg_int_scale"]
+        self.weight_reg_intens_scale = kwargs["weight_reg_int_scale"]
         self.weight_loss_deriv = kwargs["weight_loss_deriv"]
         self.weight_loss_seg = kwargs["weight_loss_seg"]
         self.supervise_seg = self.weight_loss_seg != 0
-        self.lr = kwargs["learning_rate"]
+        self.lr_inr = kwargs["learning_rate_inr"]
+        self.lr_lat = kwargs["learning_rate_lat"]
         self.lr_aff = kwargs["learning_rate_aff"]
-        self.lr_def = kwargs["learning_rate_def"]
+        self.lr_intens_scale = kwargs["learning_rate_int_scale"]
+        self.lr_anneal_tmax = kwargs["lr_anneal_tmax"]
+        self.lr_anneal_eta_min = kwargs["learning_rate_anneal_eta_min"]
         # Inference hyperparams
         self.inf_weight_loss_seg = kwargs["inf_weight_loss_seg"]
         self.inf_max_epochs = kwargs["inf_max_epochs"]
@@ -102,10 +109,43 @@ class INR_AutoReg(pl.LightningModule):
         self.inf_point_spread_start_epoch = kwargs['inf_point_spread_start_epoch']
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.lr)
-        opt_latent = torch.optim.Adam([ self.subj_latents], lr=self.lr_def)
-        opt_params = torch.optim.Adam([self.intensity_scale_params, self.aff_deform_params], lr=self.lr_def)
-        return opt_inr, opt_latent, opt_params
+        opt_inr = torch.optim.AdamW([*self.canonical_inr.parameters()], lr=self.lr_inr)
+        opt_latent = torch.optim.AdamW([ self.subj_latents], lr=self.lr_lat)
+        opt_aff = torch.optim.AdamW([ self.aff_deform_params], lr=self.lr_aff)
+        opt_intens_scale = torch.optim.AdamW([self.intensity_scale_params], lr=self.lr_intens_scale)
+
+        sched_inr = torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
+        sched_latent = torch.optim.lr_scheduler.CosineAnnealingLR(opt_latent, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
+        sched_aff = torch.optim.lr_scheduler.CosineAnnealingLR(opt_aff, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
+        sched_intens_scale = torch.optim.lr_scheduler.CosineAnnealingLR(opt_intens_scale, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
+
+        return (
+            [opt_inr, opt_latent, opt_aff, opt_intens_scale],
+            [
+                {"scheduler": sched_inr, "interval": "epoch"},
+                {"scheduler": sched_latent, "interval": "epoch"},
+                {"scheduler": sched_aff, "interval": "epoch"},
+                {"scheduler": sched_intens_scale, "interval": "epoch"},
+            ]
+        )
+
+    def reset_schedulers(self, T_max: int, eta_min: float):
+        """Call this before the second .fit() to restart schedulers fresh."""
+        opt_inr, opt_latent, opt_aff, opt_intens_scale = self.optimizers()
+        for opt, new_lr in zip([opt_inr, opt_latent, opt_aff, opt_intens_scale],
+                               [self.lr_inr, self.lr_lat, self.lr_aff, self.lr_intens_scale]):
+            for pg in opt.param_groups:
+                pg['lr'] = new_lr
+                pg['initial_lr'] = new_lr
+        new_scheds = [
+            torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=T_max, eta_min=eta_min),
+            torch.optim.lr_scheduler.CosineAnnealingLR(opt_latent, T_max=T_max, eta_min=eta_min),
+            torch.optim.lr_scheduler.CosineAnnealingLR(opt_aff, T_max=T_max, eta_min=eta_min),
+            torch.optim.lr_scheduler.CosineAnnealingLR(opt_intens_scale, T_max=T_max, eta_min=eta_min),
+        ]
+        # Swap out the internal scheduler objects Lightning holds
+        for i, new_sched in enumerate(new_scheds):
+            self.trainer.lr_scheduler_configs[i].scheduler = new_sched
 
     @staticmethod
     def loss_reg_inr_params(params, weight: float, dict_name='loss_reg_inr'):
@@ -142,7 +182,7 @@ class INR_AutoReg(pl.LightningModule):
         reg_inr_loss, reg_inr_dict = self.loss_reg_inr_params(self.canonical_inr.parameters(), self.weight_reg_inr)
         reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(self.aff_deform_params[subj_idx], self.weight_reg_aff)
         reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(self.subj_latents[subj_idx], self.weight_reg_lat)
-        reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(self.intensity_scale_params[subj_idx], self.weight_intensity_scale)
+        reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(self.intensity_scale_params[subj_idx], self.weight_reg_intens_scale)
         reg_loss = reg_inr_loss + reg_aff_loss + reg_lat_loss + reg_int_scale_loss
         reg_dict = {f"loss_reg": reg_loss,
                     **reg_inr_dict, **reg_lat_dict,
@@ -342,10 +382,11 @@ class INR_AutoReg(pl.LightningModule):
         return latent_params, aff_def_params, intens_scale_params
 
     def training_step(self, batch):
-        opt_inr, opt_latent, opt_params = self.optimizers()
+        opt_inr, opt_latent, opt_aff, opt_intens_scale = self.optimizers()
         opt_inr.zero_grad()
-        opt_params.zero_grad()
         opt_latent.zero_grad()
+        opt_aff.zero_grad()
+        opt_intens_scale.zero_grad()
 
         # Get batch elements
         (coords_voxel, intens_values, seg_values, gt_avail, aff_params, spacings, needs_flip,
@@ -353,20 +394,20 @@ class INR_AutoReg(pl.LightningModule):
          coords_surface, coords_surface_slice_idx, coords_surface_class) = batch
         latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(subject_idx)
         # Forward INR with coordinates
-        sdf_pred_d =  None
-        # warm_up = self.current_epoch < self.point_spread_start_epoch
-        # values_pred, _, sdf_pred_d, _ = self.forward_with_point_spread(coords_voxel, aff_params, spacings, needs_flip,
-        #     slice_idx, min_coords, max_coords, latent_params, aff_def_params,
-        #     self.point_spread_size_before if warm_up else self.point_spread_size_after,
-        #     self.point_spread_std_before if warm_up else self.point_spread_std_after,
-        #     return_deriv=warm_up)
-        # # Apply learnt intensity scaling to each slice
-        # values_deform = self.apply_intensity_scaling(intens_values, coords_voxel, slice_idx, intens_scale_params)
-        # # Recon loss
-        # loss_recon = self.psnr_loss(values_pred, values_deform)
+        loss_recon =  0.0
+        warm_up = self.current_epoch < self.point_spread_start_epoch
+        values_pred, _, sdf_pred_d, _ = self.forward_with_point_spread(coords_voxel, aff_params, spacings, needs_flip,
+            slice_idx, min_coords, max_coords, latent_params, aff_def_params,
+            self.point_spread_size_before if warm_up else self.point_spread_size_after,
+            self.point_spread_std_before if warm_up else self.point_spread_std_after,
+            return_deriv=False)
+        # Apply learnt intensity scaling to each slice
+        values_deform = self.apply_intensity_scaling(intens_values, coords_voxel, slice_idx, intens_scale_params)
+        # Recon loss
+        loss_recon = self.psnr_loss(values_pred, values_deform)
         # Seg metrics and loss
-        loss_sdf, loss_euk, myo_loss = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
-        loss_sdf_per_class, loss_sdf_sign = 0.0, 0.0
+        loss_sdf, loss_euk, loss_sdf_per_class = 0.0, 0.0, torch.tensor((0.,0.,0.,0.))
+        loss_sdf_sign = 0.0
         loss_thickness = 0.0
         if self.supervise_seg:
             # Eikonal loss
@@ -402,28 +443,27 @@ class INR_AutoReg(pl.LightningModule):
             # thickness2_ = thickness2_.clamp(max=0)
             # loss_thickness += -thickness2_.mean()
 
-            if self.current_epoch < 2500:
-                seg_hierarchy = seg_values[..., 1:].clone()
-                seg_hierarchy[..., 1] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1]
-                seg_hierarchy[..., 2] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1] + seg_hierarchy[...,2]
-                is_foreground = seg_hierarchy * gt_avail[..., None]
-                foreground_sdf = sdf_pred_voxel * is_foreground
-                foreground_sdf = foreground_sdf.clamp(min=0.0)
-                loss_sdf_sign = foreground_sdf.mean()
-                background_sdf = sdf_pred_voxel * seg_values[...,:1] * gt_avail[..., None]
-                background_sdf = background_sdf.clamp(max=0.0)
-                loss_sdf_sign += -background_sdf.mean()
+            seg_hierarchy = seg_values[..., 1:].clone()
+            seg_hierarchy[..., 1] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1]
+            seg_hierarchy[..., 2] = seg_hierarchy[..., 0] + seg_hierarchy[..., 1] + seg_hierarchy[...,2]
+            is_foreground = seg_hierarchy * gt_avail[..., None]
+            foreground_sdf = sdf_pred_voxel * is_foreground
+            foreground_sdf = foreground_sdf.clamp(min=0.0)
+            loss_sdf_sign = foreground_sdf.mean()
+            background_sdf = sdf_pred_voxel * seg_values[...,:1] * gt_avail[..., None]
+            background_sdf = background_sdf.clamp(max=0.0)
+            loss_sdf_sign += -background_sdf.mean()
 
         # Regularization losses
         loss_regul, loss_reg_dict = self.regularization_criterion(subject_idx)
 
         # Backprop losses and update params
-        # loss = loss_recon + loss_regul + loss_sdf + loss_euk
-        loss = loss_regul + loss_sdf + loss_euk + loss_thickness + loss_sdf_sign
+        loss = loss_recon + loss_regul + loss_sdf + loss_euk + loss_thickness + loss_sdf_sign
         self.manual_backward(loss)
         opt_inr.step()
-        opt_params.step()
         opt_latent.step()
+        opt_aff.step()
+        opt_intens_scale.step()
         # Logging
         log_name = "train_metrics"
         self.log_dict({f"{log_name}/{k}": v for k, v in
@@ -436,6 +476,12 @@ class INR_AutoReg(pl.LightningModule):
                         "loss_RV": loss_sdf_per_class[-1],
                         "seg_deriv_std": sdf_pred_d_mag.std().item(),
                         **loss_reg_dict}.items()}, prog_bar=False)
+        self.log_dict({f"{log_name}/{k}": v for k, v in
+                       {"lr_inr": opt_inr.param_groups[0]['lr'],
+                        "lr_latent": opt_latent.param_groups[0]['lr'],
+                        "lr_aff": opt_aff.param_groups[0]['lr'],
+                        "lr_intens_scale": opt_intens_scale.param_groups[0]['lr'],
+                        }.items()}, prog_bar=False)
 
     @staticmethod
     def min_max_normalize(X, x_min, x_max, s_min=0., s_max=1.):
@@ -449,6 +495,11 @@ class INR_AutoReg(pl.LightningModule):
         if (self.current_epoch > 0 and self.current_epoch >= self.logging_start_rate and self.current_epoch % self.logging_rate == 0
                 or self.current_epoch in self.addit_log_epochs):
             self.do_logging()
+
+    def on_train_epoch_end(self) -> None:
+        for sched in self.lr_schedulers():
+            sched.step()
+
 
     def do_logging(self, dset=None):
         dset_str = 'train'
@@ -667,7 +718,7 @@ class INR_AutoReg(pl.LightningModule):
             # Regularization losses
             reg_aff_loss, reg_aff_dict = self.loss_reg_aff_params(latent_params[subject_idx], self.weight_reg_aff, num_subj_slices=num_subj_slices)
             reg_lat_loss, reg_lat_dict = self.loss_reg_latent_params(aff_def_params[subject_idx], self.weight_reg_lat)
-            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(intens_scale_params[subject_idx], self.weight_intensity_scale, num_subj_slices=num_subj_slices)
+            reg_int_scale_loss, reg_int_scale_dict = self.loss_reg_int_scale_params(intens_scale_params[subject_idx], self.weight_reg_intens_scale, num_subj_slices=num_subj_slices)
             loss_reg = reg_aff_loss + reg_lat_loss + reg_int_scale_loss
             reg_dict = {f"loss_reg": loss_reg,
                         **reg_aff_dict, **reg_lat_dict,
@@ -819,7 +870,7 @@ class INR_AutoReg(pl.LightningModule):
                 contour_im = torch.stack([images[0,s,...]]*3, -1)
                 for contour_class, c_per_slice in reversed(contours.items()):
                     if c_per_slice[s]:
-                        contour_im = burn_contours(contour_im, c_per_slice[s])
+                        contour_im = burn_contours(contour_im, c_per_slice[s], COLORS[contour_class])
                 contour_im = contour_im.moveaxis(-1, 0)
                 seg_frames = torch.stack([images[0,s,...]]*3, 0)
                 red = torch.tensor(RED, device=seg_frames.device).reshape((3, 1, 1)).tile((1, *seg_frames.shape[-2:]))
@@ -833,7 +884,7 @@ class INR_AutoReg(pl.LightningModule):
                 seg_frames = torch.where(seg_mask, blue, seg_frames)
                 seg_frames = torch.cat([contour_im, seg_frames], 1)
                 # Derivatives
-                pred_img_dt = pred_sdf[...,-1].float() + 0.5
+                pred_img_dt = pred_sdf[...,-1].float()*4 + 0.5
                 pred_img_dt = torch.stack([pred_img_dt]*3, dim=0)
                 # pred_img_dt = torch.tanh(pred_img_dt)/2+0.5
                 pred_img2_dt = (pred_sdf<=0).float().moveaxis(-1, 0)

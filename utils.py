@@ -996,7 +996,7 @@ def burn_contours(image, contours_list, color=None):
                    (e.g., contour_per_class[class_idx][slice_idx])
     """
     if color is None:
-        color = COLORS
+        color = (1.0, 0.0, 0.0)
     # 1. Work on a copy to avoid corrupting the original data
     debug_img = image.clone()
 
