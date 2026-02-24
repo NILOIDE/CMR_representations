@@ -107,7 +107,7 @@ class PosEncodingNeRFAnnealed(PosEncodingNeRFOptimized):
             if self.print_thresholds:
                 prop = 1.0 if self.max_iter <= 0 else current_iter / self.max_iter
                 if self.max_iter <= 0 or prop >= self.print_thresholds[0]:
-                    print(f'Pos_enc reached {prop*100:.1f}% iters')
+                    print(f'Pos_enc reached {prop*100:.1f}% iters ({current_iter})')
                     del self.print_thresholds[0]
             if current_iter < self.max_iter:
                 mask_per_dim = []

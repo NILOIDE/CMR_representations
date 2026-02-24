@@ -98,7 +98,7 @@ def main():
     # python main.py --point_spread_std_after 0.3 0.3 0.3 0.3 --no-cache_data
     # For bools such as 'cache_data' passing --cache_data will make it True, passing --no-cache_data will make it False
     params = tyro.cli(Params)
-    params.pe_anneal_max_iter = params.pe_anneal_max_epochs * params.num_train / params.batch_size
+    params.pe_anneal_max_iter = params.pe_anneal_max_epochs * params.num_train
     params.lr_anneal_tmax = params.point_spread_start_epoch
     print(params)
 
