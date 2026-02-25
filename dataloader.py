@@ -170,7 +170,7 @@ class CMRDataModule(pl.LightningDataModule):
         # assert all([Path(i).exists() for i in annotated_subjs])
         subjects = list(sorted(os.listdir(str(self.load_la_dir))))
         subjects = annotated_subj_ids + [i for i in subjects if Path(i).name not in annotated_subj_ids]
-        subjects = list(sorted(subjects))
+        subjects = list(sorted(annotated_subj_ids))
         for i, parent in enumerate(subjects):
             if parent in {"1013493", "1439318"}:
                 continue

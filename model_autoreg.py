@@ -114,10 +114,14 @@ class INR_AutoReg(pl.LightningModule):
         opt_aff = torch.optim.AdamW([ self.aff_deform_params], lr=self.lr_aff)
         opt_intens_scale = torch.optim.AdamW([self.intensity_scale_params], lr=self.lr_intens_scale)
 
-        sched_inr = torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
-        sched_latent = torch.optim.lr_scheduler.CosineAnnealingLR(opt_latent, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
-        sched_aff = torch.optim.lr_scheduler.CosineAnnealingLR(opt_aff, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
-        sched_intens_scale = torch.optim.lr_scheduler.CosineAnnealingLR(opt_intens_scale, T_max=self.lr_anneal_tmax, eta_min=self.lr_anneal_eta_min)
+        sched_inr = torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=self.lr_anneal_tmax,
+                                                               eta_min=min(self.lr_inr, self.lr_anneal_eta_min))
+        sched_latent = torch.optim.lr_scheduler.CosineAnnealingLR(opt_latent, T_max=self.lr_anneal_tmax,
+                                                                  eta_min=min(self.lr_lat, self.lr_anneal_eta_min))
+        sched_aff = torch.optim.lr_scheduler.CosineAnnealingLR(opt_aff, T_max=self.lr_anneal_tmax,
+                                                               eta_min=min(self.lr_aff, self.lr_anneal_eta_min))
+        sched_intens_scale = torch.optim.lr_scheduler.CosineAnnealingLR(opt_intens_scale, T_max=self.lr_anneal_tmax,
+                                                                        eta_min=min(self.lr_intens_scale, self.lr_anneal_eta_min))
 
         return (
             [opt_inr, opt_latent, opt_aff, opt_intens_scale],
@@ -129,23 +133,9 @@ class INR_AutoReg(pl.LightningModule):
             ]
         )
 
-    def reset_schedulers(self, T_max: int, eta_min: float):
-        """Call this before the second .fit() to restart schedulers fresh."""
-        opt_inr, opt_latent, opt_aff, opt_intens_scale = self.optimizers()
-        for opt, new_lr in zip([opt_inr, opt_latent, opt_aff, opt_intens_scale],
-                               [self.lr_inr, self.lr_lat, self.lr_aff, self.lr_intens_scale]):
-            for pg in opt.param_groups:
-                pg['lr'] = new_lr
-                pg['initial_lr'] = new_lr
-        new_scheds = [
-            torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=T_max, eta_min=eta_min),
-            torch.optim.lr_scheduler.CosineAnnealingLR(opt_latent, T_max=T_max, eta_min=eta_min),
-            torch.optim.lr_scheduler.CosineAnnealingLR(opt_aff, T_max=T_max, eta_min=eta_min),
-            torch.optim.lr_scheduler.CosineAnnealingLR(opt_intens_scale, T_max=T_max, eta_min=eta_min),
-        ]
-        # Swap out the internal scheduler objects Lightning holds
-        for i, new_sched in enumerate(new_scheds):
-            self.trainer.lr_scheduler_configs[i].scheduler = new_sched
+    def on_train_epoch_end(self) -> None:
+        for sched in self.lr_schedulers():
+            sched.step()
 
     @staticmethod
     def loss_reg_inr_params(params, weight: float, dict_name='loss_reg_inr'):

@@ -52,9 +52,9 @@ class Params:
     spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
-    weight_reg_lat: float = 1e-3
-    weight_reg_aff: float = 1e-6
-    weight_reg_int_scale: float = 0e-6
+    weight_reg_lat: float = 1e-4
+    weight_reg_aff: float = 1e-4
+    weight_reg_int_scale: float = 1e-5
     # Segmentation ----------------------------------------------------------------
     weight_loss_seg: float = 0e3
     weight_loss_deriv: float = 0e1
@@ -164,7 +164,9 @@ def main():
         trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
         # Then continue with updated datasets ready for point-spread
         trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
-        model.reset_schedulers(params.max_epochs, params.learning_rate_anneal_eta_min_psf)
+        model.lr_anneal_eta_min = params.learning_rate_anneal_eta_min_psf
+        model.lr_anneal_tmax = params.max_epochs - model.lr_anneal_tmax
+        model.trainer.strategy.setup_optimizers(model.trainer)
         trainer.fit_loop.max_epochs = params.max_epochs
         trainer.fit(model, datamodule=data_module)
     else:
