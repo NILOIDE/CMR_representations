@@ -496,7 +496,7 @@ class INR_AutoReg(pl.LightningModule):
         dset_str = 'train'
         if dset is None:
             dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
-        for i in range(0, 2):
+        for i in range(0, 4):
             batch = tuple(b[None].cuda() for b in dset[i])
             latent_params, aff_def_params, intens_scale_params = self.get_train_set_learnable_params(batch[5+2])
             self.log_images(i, dset, mode=dset_str,
@@ -510,9 +510,9 @@ class INR_AutoReg(pl.LightningModule):
         dset = eval(f"self.trainer.datamodule.{dset_str}_dset")
         for i in range(0, 2):
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
-            opt_latent = torch.optim.Adam([latent_params], lr=self.lr)
+            opt_latent = torch.optim.Adam([latent_params], lr=self.lr_lat)
             opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff)
-            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def)
+            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_intens_scale)
             optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score, *_ \
                 = self.inference(i, dset,
                                  latent_params=latent_params,
