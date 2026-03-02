@@ -83,10 +83,10 @@ class Params:
     inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=024999.ckpt"
     inf_max_epochs: int = 2000
     inf_num_coords: int = 35_000
-    inf_learning_rate_inr: float = 1e-5
+    inf_learning_rate_inr: float = 0e-5
     inf_learning_rate_latent: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
-    inf_learning_rate_def: float = 1e-3
+    inf_learning_rate_int_scale: float = 1e-3
     inf_point_spread_start_epoch: int = 2500
     inf_weight_loss_seg: float = 0e0
 

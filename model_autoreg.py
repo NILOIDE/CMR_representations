@@ -105,7 +105,7 @@ class INR_AutoReg(pl.LightningModule):
         self.inf_lr_inr = kwargs["inf_learning_rate_inr"]
         self.inf_lr_latent = kwargs["inf_learning_rate_latent"]
         self.inf_lr_aff = kwargs["inf_learning_rate_aff"]
-        self.inf_lr_def = kwargs["inf_learning_rate_def"]
+        self.inf_lr_intens_scale = kwargs["inf_learning_rate_int_scale"]
         self.inf_point_spread_start_epoch = kwargs['inf_point_spread_start_epoch']
 
     def configure_optimizers(self):
@@ -487,11 +487,6 @@ class INR_AutoReg(pl.LightningModule):
                 or self.current_epoch in self.addit_log_epochs):
             self.do_logging()
 
-    def on_train_epoch_end(self) -> None:
-        for sched in self.lr_schedulers():
-            sched.step()
-
-
     def do_logging(self, dset=None):
         dset_str = 'train'
         if dset is None:
@@ -548,7 +543,7 @@ class INR_AutoReg(pl.LightningModule):
             latent_params, aff_def_params, intens_scale_params = self.initialize_inference_params()
             opt_latent = torch.optim.Adam([latent_params], lr=self.inf_lr_latent)
             opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.inf_lr_aff)
-            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.inf_lr_def)
+            opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.inf_lr_intens_scale)
             opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.inf_lr_inr)
             (optimized_latent, optimized_affine_def, optimized_intensity_def, best_step_num, best_score,
              opt_latent, opt_affine_def, opt_intensity_def, opt_inr) \
@@ -642,10 +637,10 @@ class INR_AutoReg(pl.LightningModule):
                   log=True,
                   ):
         # Optimizers (won't be used if not supervised)
-        opt_latent = torch.optim.Adam([latent_params], lr=self.lr) if opt_latent is None else opt_latent
-        opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.lr_aff) if opt_affine_def is None else opt_affine_def
-        opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.lr_def) if opt_intensity_def is None else opt_intensity_def
-        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.lr) if opt_inr is None else opt_inr
+        opt_latent = torch.optim.Adam([latent_params], lr=self.inf_lr_latent) if opt_latent is None else opt_latent
+        opt_affine_def = torch.optim.Adam([aff_def_params], lr=self.inf_lr_aff) if opt_affine_def is None else opt_affine_def
+        opt_intensity_def = torch.optim.Adam([intens_scale_params], lr=self.inf_lr_intens_scale) if opt_intensity_def is None else opt_intensity_def
+        opt_inr = torch.optim.Adam([*self.canonical_inr.parameters()], lr=self.inf_lr_inr) if opt_inr is None else opt_inr
 
         point_spread_std_before = torch.tensor(point_spread_std_before, dtype=torch.float32, device="cuda"
                                                ).reshape(1, 1, 1, self.coord_size)
