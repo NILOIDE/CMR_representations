@@ -4,7 +4,7 @@ import os
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from datetime import datetime
 import tyro
 import torch
@@ -21,13 +21,13 @@ from model_autoreg import INR_AutoReg
 class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
-    max_epochs: int = 20_000
+    max_epochs: int = 30_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
-    logging_rate: int = 2_000
-    logging_start_rate: int = 10_000
-    addit_log_epochs: Tuple[int, ...] = (1000, 2000, 5000)
+    logging_rate: int = 2000
+    logging_start_rate: int = 5000
+    addit_log_epochs: Tuple[int, ...] = (2500,)
     num_train: int = 100
     num_val: int = 2
     num_test: int = 1
@@ -36,9 +36,9 @@ class Params:
     cache_data: bool = True
 
     num_coords_voxel: int = 40_000
-    num_coords_surface: int = 10_000
+    num_coords_surface: int = 10
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 10000
+    point_spread_start_epoch: int = 5000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 20_000
@@ -46,10 +46,12 @@ class Params:
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
+    num_blocks: int = 4  # num_hidden_layers // num_blocks
     hidden_size: int = 512
-    latent_size: int = 16
+    layer_type: str = 'relu'
+    latent_size: Tuple[int, ...] = (128, 32, 16, 8)  # Earlier layers -> later layers, coarse -> fine
+    spatial_functa_resolution: Tuple[int, ...] = (1, 4, 8, 16)  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
-    spatial_functa_resolution: int = 4  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_lat: float = 1e-4
@@ -62,13 +64,17 @@ class Params:
     # Learning rates -------------------------------------------------------------------
     learning_rate_inr: float = 1e-3
     learning_rate_lat: float = 1e-3
-    learning_rate_aff: float = 1e-2
-    learning_rate_int_scale: float = 1e-2
+    learning_rate_aff: float = 0.0
+    learning_rate_int_scale: float = 1e-3
     learning_rate_anneal_eta_min: float = 1e-4
-    learning_rate_anneal_eta_min_psf: float = 1e-6
+    learning_rate_inr_postwarmup: float = 1e-3
+    learning_rate_lat_postwarmup: float = 1e-3
+    learning_rate_aff_postwarmup: float = 1e-3
+    learning_rate_int_scale_postwarmup: float = 1e-3
+    learning_rate_anneal_eta_min_postwarmup: float = 1e-6
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
-    pe_anneal_max_epochs: int = 13000
+    pe_anneal_max_epochs: int = 10000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
@@ -81,8 +87,8 @@ class Params:
     # Inference ----------
     inference: bool = False
     inference_path: str = "/home/nil/Documents/git/CMR_intensity_alignment/trained_models/20251125-034718-psf20k_100subj-20ann/checkpoints/epoch-epoch=024999.ckpt"
-    inf_max_epochs: int = 2000
-    inf_num_coords: int = 35_000
+    inf_max_epochs: int = 1000
+    inf_num_coords: int = 20_000
     inf_learning_rate_inr: float = 0e-5
     inf_learning_rate_latent: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
@@ -164,7 +170,11 @@ def main():
         trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
         # Then continue with updated datasets ready for point-spread
         trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
-        model.lr_anneal_eta_min = params.learning_rate_anneal_eta_min_psf
+        model.lr_anneal_eta_min = params.learning_rate_anneal_eta_min_postwarmup
+        model.lr_inr = params.learning_rate_inr_postwarmup
+        model.lr_lat = params.learning_rate_lat_postwarmup
+        model.lr_aff = params.learning_rate_aff_postwarmup
+        model.lr_int_scale = params.learning_rate_int_scale_postwarmup
         model.lr_anneal_tmax = params.max_epochs - model.lr_anneal_tmax
         model.trainer.strategy.setup_optimizers(model.trainer)
         trainer.fit_loop.max_epochs = params.max_epochs

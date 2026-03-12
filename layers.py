@@ -17,7 +17,15 @@ class Layer(nn.Module):
         self.out_size = out_size
 
     @abc.abstractmethod
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                gamma: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """"
+        x: layer input (B, F)
+        gamma: pre-activation scaling (frequency modulation) (B, F)
+        beta: pre-activation shift (phase modulation) (B, F)
+        """
         raise NotImplementedError
 
 
@@ -28,8 +36,20 @@ class Relu(Layer):
         super(Relu, self).__init__(in_size, out_size, **kwargs)
         self.linear = nn.Linear(in_size, out_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                gamma: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """"
+        x: layer input (B, F)
+        gamma: pre-activation scaling (frequency modulation) (B, F)
+        beta: pre-activation shift (phase modulation) (B, F)
+        """
         x = self.linear(x)
+        if gamma is not None:
+            x = gamma * x
+        if beta is not None:
+            x = x + beta
         x = torch.relu(x)
         if self.dropout is not None:
             x = self.dropout(x)
@@ -47,8 +67,20 @@ class Sine(Layer):
         self.siren_factor = siren_factor
         self.weight_init()
 
-    def forward(self, x):
+    def forward(self,
+                x: torch.Tensor,
+                gamma: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """"
+        x: layer input (B, F)
+        gamma: pre-activation scaling (frequency modulation) (B, F)
+        beta: pre-activation shift (phase modulation) (B, F)
+        """
         x = self.linear(x)
+        if gamma is not None:
+            x = gamma * x
+        if beta is not None:
+            x = x + beta
         x = torch.sin(self.siren_factor * x)
         if self.dropout is not None:
             x = self.dropout(x)
@@ -83,9 +115,25 @@ class WIRE(Layer):
         self.freqs = nn.Linear(in_size, out_size, bias=bias)
         self.scale = nn.Linear(in_size, out_size, bias=bias)
 
-    def forward(self, x):
-        omega = self.omega_0 * self.freqs(x)
-        scale = self.scale(x) * self.scale_0
+    def forward(self,
+                x: torch.Tensor,
+                gamma: Optional[torch.Tensor] = None,
+                beta: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """"
+        x: layer input (B, F)
+        gamma: pre-activation scaling (frequency modulation) (B, F)
+        beta: pre-activation shift (phase modulation) (B, F)
+        """
+        z_omega = self.freqs(x)
+        z_scale = self.scale(x)
+        if gamma is not None:
+            z_omega = z_omega * gamma
+            z_scale = z_scale * gamma
+        if beta is not None:
+            z_omega = z_omega + beta
+            z_scale = z_scale + beta
+        omega = self.omega_0 * z_omega
+        scale = self.scale_0 * z_scale
         x = torch.cos(omega) * torch.exp(-(scale * scale))
         if self.dropout is not None:
             x = self.dropout(x)
