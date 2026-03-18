@@ -41,7 +41,7 @@ class Params:
     point_spread_start_epoch: int = 5000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
-    num_coords_during_point_spread: int = 20_000
+    num_coords_during_point_spread: int = 18_000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
     point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
     # Model -------------------------------------------------------------------
@@ -49,7 +49,7 @@ class Params:
     num_blocks: int = 4  # num_hidden_layers // num_blocks
     hidden_size: int = 512
     layer_type: str = 'relu'
-    latent_size: Tuple[int, ...] = (128, 32, 16, 8)  # Earlier layers -> later layers, coarse -> fine
+    latent_size: Tuple[int, ...] = (128, 32, 16, 4)  # Earlier layers -> later layers, coarse -> fine
     spatial_functa_resolution: Tuple[int, ...] = (1, 4, 8, 16)  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
     int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Regularization -------------------------------------------------------------------
@@ -73,7 +73,7 @@ class Params:
     learning_rate_int_scale_postwarmup: float = 1e-3
     learning_rate_anneal_eta_min_postwarmup: float = 1e-6
     # Positional encoder -------------------------------------------------------------------
-    pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,5,5)
+    pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,4,4)
     pe_anneal_max_epochs: int = 10000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
