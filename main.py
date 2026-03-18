@@ -21,7 +21,7 @@ from model_autoreg import INR_AutoReg
 class Params:
     """" Default params """
     # Epochs -------------------------------------------------------------------
-    max_epochs: int = 30_000
+    max_epochs: int = 10_000
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
@@ -74,7 +74,7 @@ class Params:
     learning_rate_anneal_eta_min_postwarmup: float = 1e-6
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,4,4)
-    pe_anneal_max_epochs: int = 10000
+    pe_anneal_max_epochs: int = 5000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
