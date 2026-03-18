@@ -25,9 +25,9 @@ class Params:
     logging_disabled: bool = False
     logging_wandb_disabled: bool = False
     replace_existing_preprocessed: bool = False
-    logging_rate: int = 2000
-    logging_start_rate: int = 5000
-    addit_log_epochs: Tuple[int, ...] = (2500,)
+    logging_rate: int = 1000
+    logging_start_rate: int = 1000
+    addit_log_epochs: Tuple[int, ...] = (500,)
     num_train: int = 100
     num_val: int = 2
     num_test: int = 1
@@ -38,7 +38,7 @@ class Params:
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 5000
+    point_spread_start_epoch: int = 1000
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 18_000
