@@ -43,7 +43,7 @@ class Params:
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 18_000
     point_spread_std_before: Tuple[float, float, float, float] = (0.01, 0.01, 0.01, 0.01)#(0.3, 0.3, 0.3, 0.3)
-    point_spread_std_after: Tuple[float, float, float, float] = (0.3, 0.3, 0.3, 0.3)
+    point_spread_std_after: Tuple[float, float, float, float] = (1/2.355, 1/2.355, 0.8/2.355, 1.7/2.355)
     # Model -------------------------------------------------------------------
     num_hidden_layers: int = 16
     num_blocks: int = 4  # num_hidden_layers // num_blocks
