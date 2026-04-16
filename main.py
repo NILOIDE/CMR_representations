@@ -38,7 +38,7 @@ class Params:
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 1000
+    point_spread_start_epoch: int = 0
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 18_000

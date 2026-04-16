@@ -18,6 +18,7 @@ import torch.nn.functional as F
 import lightning.pytorch as pl
 import wandb
 from monai.losses import DiceLoss
+from muon import SingleDeviceMuonWithAuxAdam
 
 from data_utils import array_to_nifti
 from dataset import CardiacUKBB, CardiacUKBBValidation
@@ -115,10 +116,34 @@ class INR_AutoReg(pl.LightningModule):
         self.inf_point_spread_start_epoch = kwargs['inf_point_spread_start_epoch']
 
     def configure_optimizers(self):
-        opt_inr = torch.optim.AdamW([*self.canonical_inr.parameters()], lr=self.lr_inr)
-        opt_latent = torch.optim.AdamW(self.subj_latents, lr=self.lr_lat)
-        opt_aff = torch.optim.AdamW([self.aff_deform_params], lr=self.lr_aff)
-        opt_intens_scale = torch.optim.AdamW([self.intensity_scale_params], lr=self.lr_intens_scale)
+        aux_params = []  # first/last weights + all biases
+        all_weight_matrices = []
+        for name, p in self.canonical_inr.named_parameters():
+            # Check if parameter is a 2D matrix (weights), not a vector (bias)
+            if p.ndim == 2 and p.size(0) > 1 and p.size(1) > 1:
+                all_weight_matrices.append(p)
+            else:
+                # all others go to Adam
+                aux_params.append(p)
+
+        muon_target_params = []  # only hidden weights
+        # based on sorted position
+        if len(all_weight_matrices) > 0:
+            # 1. First Layer -> Aux Adam
+            aux_params.append(all_weight_matrices[0])
+            # 2. Last Layer -> Aux Adam
+            aux_params.append(all_weight_matrices[-1])
+            # 3. Hidden Layers -> Muon
+            if len(all_weight_matrices) > 2:
+                muon_target_params.extend(all_weight_matrices[1:-1])
+        opt_inr = SingleDeviceMuonWithAuxAdam([
+            dict(params=muon_target_params, use_muon=True, lr=self.lr_inr, weight_decay=0.0),
+            dict(params=aux_params, use_muon=False, lr=self.lr_inr, betas=(0.9, 0.999), weight_decay=0.0)
+        ])
+        # opt_inr = torch.optim.Muon(muon_target_params, lr=self.lr_inr,)
+        opt_latent = torch.optim.Adam(self.subj_latents, lr=self.lr_lat)
+        opt_aff = torch.optim.Adam([self.aff_deform_params], lr=self.lr_aff)
+        opt_intens_scale = torch.optim.Adam([self.intensity_scale_params], lr=self.lr_intens_scale)
 
         sched_inr = torch.optim.lr_scheduler.CosineAnnealingLR(opt_inr, T_max=self.lr_anneal_tmax,
                                                                eta_min=min(self.lr_inr, self.lr_anneal_eta_min))
