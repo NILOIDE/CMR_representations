@@ -71,7 +71,7 @@ class Params:
     learning_rate_lat_postwarmup: float = 1e-3
     learning_rate_aff_postwarmup: float = 1e-3
     learning_rate_int_scale_postwarmup: float = 1e-3
-    learning_rate_anneal_eta_min_postwarmup: float = 1e-6
+    learning_rate_anneal_eta_min_postwarmup: float = 1e-5
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,4,4)
     pe_anneal_max_epochs: int = 5000
