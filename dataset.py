@@ -10,8 +10,14 @@ from utils import make_masked_coordinate_tensor, to_1hot, make_coordinate_tensor
 
 
 class CardiacUKBB(Dataset):
-    def __init__(self, subject_data_paths, max_slices, max_slice_shape,
-                 num_coords_voxel=30000, num_coords_surface=10000, cache_data=True, cache_to_gpu=False, **kwargs):
+    def __init__(self,
+                 subject_data_paths,
+                 max_slices,
+                 max_slice_shape,
+                 num_coords_voxel=30000,
+                 num_coords_surface=10000,
+                 cache_data=True,
+                 **kwargs):
         super().__init__()
         self.data_paths = subject_data_paths
         self.num_subjs = len(subject_data_paths)
@@ -19,7 +25,7 @@ class CardiacUKBB(Dataset):
         self.num_coords_contour = num_coords_surface
         self.max_slices = max_slices
         self.max_slice_shape = max_slice_shape
-        device = "cuda" if cache_to_gpu else "cpu"
+        device = "cpu"
         self.cache_data = cache_data
         if cache_data:
             H, W, T = self.max_slice_shape
@@ -36,10 +42,7 @@ class CardiacUKBB(Dataset):
             self.num_subj_slices = torch.zeros((self.num_subjs,), dtype=torch.uint8, device=device)
             self.contours = [[] for _ in range(self.num_subjs)]
             self.load_data_to_cache()
-            if cache_to_gpu:
-                self.non_padding_indices = [i.cuda() for i in self.non_padding_indices]
         self.coord_size = self.load_subject_data(0, 0)[4].shape[-1]
-
 
     def load_data_to_cache(self):
         for i, path in tqdm.tqdm(list(enumerate(self.data_paths)), desc="Loading data to cache"):
