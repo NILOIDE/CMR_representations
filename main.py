@@ -34,11 +34,16 @@ class Params:
     num_workers: int = 4
     batch_size: int = 4
     cache_data: bool = True
+    prioritized_sampling: bool = True
+    prioritized_sampling_alpha: float = 0.7  # Sampling bias. 0.0 = uniform, 1.0 = proportional, >>1.0 = top-k deterministic.
+    prioritized_sampling_beta_start: float = 0.7  # Importance sampling loss-weighting term. 0.0<b<1.0 = Prioritize hard samples. 1.0 = Fully correct bias
+    prioritized_sampling_beta_max_epochs: int = 5000
+    prioritized_sampling_gamma: float = 0.7  # Exponential moving average. How much of the old error to preserve when updating
 
     num_coords_voxel: int = 40_000
     num_coords_surface: int = 10
     # Point spread function ------------------------------------------------------------
-    point_spread_start_epoch: int = 0
+    point_spread_start_epoch: int = 10
     point_spread_size_before: int = 1
     point_spread_size_after: int = 16
     num_coords_during_point_spread: int = 18_000
@@ -51,12 +56,10 @@ class Params:
     layer_type: str = 'relu'
     latent_size: Tuple[int, ...] = (128, 32, 16, 4)  # Earlier layers -> later layers, coarse -> fine
     spatial_functa_resolution: Tuple[int, ...] = (1, 4, 8, 16)  # If 1, a single global vec is used. If >1, latent size is split between the 4 dims (n^4)
-    int_scale_range: float = 0.3  # applied via: int_scaled = int * (1 + tanh(x)*(scale_range/2))
     # Regularization -------------------------------------------------------------------
     weight_reg_inr: float = 1e-5
     weight_reg_lat: float = 1e-4
     weight_reg_aff: float = 1e-4
-    weight_reg_int_scale: float = 1e-5
     # Segmentation ----------------------------------------------------------------
     weight_loss_seg: float = 0e3
     weight_loss_deriv: float = 0e1
@@ -65,16 +68,14 @@ class Params:
     learning_rate_inr: float = 1e-3
     learning_rate_lat: float = 1e-3
     learning_rate_aff: float = 0.0
-    learning_rate_int_scale: float = 1e-3
     learning_rate_anneal_eta_min: float = 1e-4
     learning_rate_inr_postwarmup: float = 1e-3
     learning_rate_lat_postwarmup: float = 1e-3
     learning_rate_aff_postwarmup: float = 1e-3
-    learning_rate_int_scale_postwarmup: float = 1e-3
     learning_rate_anneal_eta_min_postwarmup: float = 1e-5
     # Positional encoder -------------------------------------------------------------------
     pe_num_frequencies: Tuple[int, int, int, int, int] = (8,8,8,4,4)
-    pe_anneal_max_epochs: int = 5000
+    pe_anneal_max_epochs: int = 2000
     pe_anneal_start_prop: float = 0.2
     pe_freq_scale: float = 1.0
     # Paths
@@ -92,7 +93,6 @@ class Params:
     inf_learning_rate_inr: float = 0e-5
     inf_learning_rate_latent: float = 1e-3
     inf_learning_rate_aff: float = 1e-3
-    inf_learning_rate_int_scale: float = 1e-3
     inf_point_spread_start_epoch: int = 2500
     inf_weight_loss_seg: float = 0e0
 
@@ -127,7 +127,7 @@ def main():
                                 num_val=params.num_val,
                                 num_test=params.num_test,
                                 batch_size=params.batch_size,
-                                num_coords_voxel=params.num_coords_voxel,
+                                num_coords_voxel=params.num_coords_voxel*10 if params.prioritized_sampling else params.num_coords_voxel,
                                 num_coords_surface=params.num_coords_surface,
                                 inf_num_coords=params.inf_num_coords,
                                 num_workers=params.num_workers,
@@ -143,7 +143,7 @@ def main():
     log_path = model_path / 'logs'
     log_path.mkdir(exist_ok=True)
     model = INR_AutoReg(coord_size=data_module.get_coord_size(), num_subjects=data_module.num_train,
-                        max_slices=data_module.get_max_slices(), regist_cache_dims=data_module.get_max_slice_shape(),
+                        max_slices=data_module.get_max_slices(), max_slice_shape=data_module.get_max_slice_shape(),
                         log_path=log_path, **params.__dict__)
 
     os.environ['WANDB_DISABLED'] = str(params.logging_wandb_disabled)
@@ -169,12 +169,15 @@ def main():
         # First train up until point-spread start epochs
         trainer.fit(model, datamodule=data_module, ckpt_path=ckpt_path)
         # Then continue with updated datasets ready for point-spread
-        trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
+        if params.prioritized_sampling:
+            trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread*10
+        else:
+            trainer.datamodule.train_dset.num_coords = params.num_coords_during_point_spread
+        model.target_num_coords = params.num_coords_during_point_spread
         model.lr_anneal_eta_min = params.learning_rate_anneal_eta_min_postwarmup
         model.lr_inr = params.learning_rate_inr_postwarmup
         model.lr_lat = params.learning_rate_lat_postwarmup
         model.lr_aff = params.learning_rate_aff_postwarmup
-        model.lr_int_scale = params.learning_rate_int_scale_postwarmup
         model.lr_anneal_tmax = params.max_epochs - model.lr_anneal_tmax
         model.trainer.strategy.setup_optimizers(model.trainer)
         trainer.fit_loop.max_epochs = params.max_epochs
